@@ -49,6 +49,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "GeoSOT|Core")
 	static double GetHeightSpan(int32 Level);
 	
+	// [新增] 将 Row/Col 转换为 GeoSOT Z-order 编码 (64位)
+	static int64 GenerateGeoSOTCode(int32 Row, int32 Col, int32 Level, int32 AltIndex);
+
+	// [新增] 解析编码回 Row/Col (用于验证或解码)
+	static void DecodeGeoSOTCode(int64 Code, int32& OutRow, int32& OutCol, int32& OutLevel);
+	
 	// [新增] 核心解耦函数：计算网格在 UE 世界空间中的物理变换
 	// 输入：地理引用、网格数据
 	// 输出：世界坐标中心、世界旋转四元数、物理缩放
@@ -60,9 +66,6 @@ public:
 		FVector& OutScale
 	);
 
-	// [新增] 统一的 ID 生成器：将行列号转为唯一的 int64 编码
-	// 方便数据库存储和查找
-	static int64 GetGridCodeID(const FGeoSOTCell& Cell);
 
 private:
 	// 计算经纬度索引
@@ -70,4 +73,9 @@ private:
     
 	// 计算高度索引 (基于赤道度数比例)
 	static int64 CalculateAltIndex(double HeightMeters, int32 Level);
+	
+	// [内部工具] 扩张二进制位 (例如 111 -> 10101)
+	static uint64 SpreadBits(uint32 x);
+	// [内部工具] 收缩二进制位
+	static uint32 CompactBits(uint64 x);
 };

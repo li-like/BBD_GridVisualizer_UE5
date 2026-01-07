@@ -60,6 +60,7 @@ struct FGeoSOTCell
     double MinLat;
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     double MaxLat;
+    
 
     // 高度边界 (由 GeoSOT 层级决定的物理高度，而非用户输入)
     UPROPERTY(EditAnywhere, BlueprintReadWrite)

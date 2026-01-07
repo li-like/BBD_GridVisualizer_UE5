@@ -118,12 +118,27 @@ TArray<FGeoSOTCell> UGeoSOTUtils::GetGridsInRadius3D(
 }
 
 
-int64 UGeoSOTUtils::GetGridCodeID(const FGeoSOTCell& Cell)
+int64 UGeoSOTUtils::GenerateGeoSOTCode(int32 Row, int32 Col, int32 Level, int32 AltIndex)
 {
-    // 简单的 ID 生成策略：高32位存Row，低32位存Col
-    // 实际 GeoSOT 编码可能更复杂(Z-order)，但目前这个足够唯一标识
-    return ((int64)Cell.Code.Row << 32) | (int64)Cell.Code.Col;
+    // 1. 计算 2D Morton 码 (经纬度)
+    // Row 放高位 (奇数位)，Col 放低位 (偶数位)
+    uint64 SpacedRow = SpreadBits((uint32)Row);
+    uint64 SpacedCol = SpreadBits((uint32)Col);
+    
+    // 组合成 2D 编码 (通常占用约 2*Level 位，例如 L21 占用 42位)
+    int64 MortonCode2D = (int64)((SpacedRow << 1) | SpacedCol);
+    
+    // 2. 融合高度信息
+    // 策略：将 2D 编码左移 16 位，腾出低 16 位给高度
+    // 限制：AltIndex 不能超过 65535 (0xFFFF)
+    // 限制：2D 编码不能超过 47 位 (Level 23 以内都安全)
+    
+    int64 FinalCode = (MortonCode2D << 16) | (AltIndex & 0xFFFF);
+    
+    return FinalCode;
 }
+
+
 
 bool UGeoSOTUtils::CalculateGridWorldTransform(
     ACesiumGeoreference* GeoRef,
@@ -164,4 +179,31 @@ bool UGeoSOTUtils::CalculateGridWorldTransform(
     OutScale.Z = DirUp.Size() / 50.0f;
 
     return true;
+}
+
+
+// 辅助函数：将 32位整数的位扩展开 (0000abc -> 0a0b0c)
+// 用于构造 Morton Code
+uint64 UGeoSOTUtils::SpreadBits(uint32 x)
+{
+    uint64 n = x;
+    n = (n | (n << 32)) & 0x00000000FFFFFFFF;
+    n = (n | (n << 16)) & 0x0000FFFF0000FFFF;
+    n = (n | (n << 8))  & 0x00FF00FF00FF00FF;
+    n = (n | (n << 4))  & 0x0F0F0F0F0F0F0F0F;
+    n = (n | (n << 2))  & 0x3333333333333333;
+    n = (n | (n << 1))  & 0x5555555555555555;
+    return n;
+}
+
+// 辅助函数：逆运算
+uint32 UGeoSOTUtils::CompactBits(uint64 x)
+{
+    uint64 n = x & 0x5555555555555555;
+    n = (n | (n >> 1))  & 0x3333333333333333;
+    n = (n | (n >> 2))  & 0x0F0F0F0F0F0F0F0F;
+    n = (n | (n >> 8))  & 0x00FF00FF00FF00FF;
+    n = (n | (n >> 16)) & 0x0000FFFF0000FFFF;
+    n = (n | (n >> 32)) & 0x00000000FFFFFFFF;
+    return (uint32)n;
 }

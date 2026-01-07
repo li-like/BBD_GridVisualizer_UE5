@@ -32,6 +32,10 @@ struct FChunkPackage
 
     // 待重检列表：存储该 Chunk 内目前显示为"绿色"的网格
     TArray<FSimpleGridInfo> SuspectedFreeGrids;
+    
+    // [新增] 索引映射表：Instance Index -> GeoSOT Code
+    TMap<int32, int64> FreeInstanceToCodeMap;
+    TMap<int32, int64> OccupiedInstanceToCodeMap;
 };
 
 UCLASS()
@@ -104,6 +108,9 @@ public:
     // 远处检测间隔 (秒) - 建议 1.0s
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|RealTime")
     float FarCheckInterval = 1.0f;
+    
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT")
+    int64 GetGeoSOTCodeByHit(UPrimitiveComponent* HitComponent, int32 HitItem);
 
 private:
     // =================================================================

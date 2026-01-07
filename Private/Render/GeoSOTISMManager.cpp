@@ -201,6 +201,7 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
 
             // 用于控制日志频率 (只打第一个网格)
             bool bLoggedDebug = false;
+            int32 DebugCount = 0;
 
             for (const FGeoSOTCell& Grid : SubGrids)
             {
@@ -208,6 +209,12 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                 FVector CenterPos_World;
                 FQuat GridQuat_World;
                 FVector NewScale;
+                double GridHeightSpan = Grid.MaxHeight - Grid.MinHeight;
+                int32 AltLayerIndex = 0;
+                if (GridHeightSpan > 0.1) // 防止除以0
+                {
+                    AltLayerIndex = FMath::RoundToInt((Grid.MinHeight - MinAltitude) / GridHeightSpan);
+                }
 
                 // 这一步封装了所有复杂的几何计算
                 if (!UGeoSOTUtils::CalculateGridWorldTransform(Georeference, Grid, CenterPos_World, GridQuat_World, NewScale))
@@ -216,7 +223,27 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                 }
 
                 // === [新增] 获取唯一 ID ===
-                int64 GridCode = UGeoSOTUtils::GetGridCodeID(Grid);
+                int64 GridCode = UGeoSOTUtils::GenerateGeoSOTCode(Grid.Code.Row, Grid.Code.Col, Grid.Code.Level,AltLayerIndex);
+                // ================= [调试代码开始] =================
+                // 每个 Chunk 只打印前 10 个网格的编码详情
+                if (DebugCount < 10)
+                {
+                    // 将 Code 转为二进制字符串，方便检查位交叉是否正确
+                    FString BinaryStr = "";
+                    for (int32 i = 63; i >= 0; --i)
+                    {
+                        BinaryStr += ((GridCode >> i) & 1) ? TEXT("1") : TEXT("0");
+                    }
+
+                    UE_LOG(LogTemp, Warning, TEXT("[GeoSOT Check] Level: %d | Row: %d | Col: %d => Code: %lld"), 
+                        Grid.Code.Level, Grid.Code.Row, Grid.Code.Col, GridCode);
+                    
+                    // 如果你想看更详细的二进制结构，取消下面这行的注释
+                    UE_LOG(LogTemp, Log, TEXT("    Binary: %s"), *BinaryStr);
+
+                    DebugCount++;
+                }
+                // ================= [调试代码结束] =================
 
                 // --- B. 转换为【本地空间】参数 (用于 ISM 渲染) ---
                 // [核心修复] 使用 InverseTransformPosition
@@ -241,18 +268,27 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
 
                 if (bHit)
                 {
+                    // 红色
+                    int32 NewIdx = NewPackage.OccupiedISM->GetInstanceCount() + BatchOccupiedTransforms.Num();
                     BatchOccupiedTransforms.Add(RenderTransform);
+                    
+                    // [新增] 记录红色映射
+                    NewPackage.OccupiedInstanceToCodeMap.Add(NewIdx, GridCode);
                 }
                 else
                 {
-                    int32 StartIdx = NewPackage.FreeISM->GetInstanceCount() + BatchFreeTransforms.Num();
+                    // 绿色
+                    int32 NewIdx = NewPackage.FreeISM->GetInstanceCount() + BatchFreeTransforms.Num();
                     BatchFreeTransforms.Add(RenderTransform);
 
                     FSimpleGridInfo Info;
-                    Info.GridCode = GridCode; // [新增] 存下 ID
-                    Info.GridTransform = RenderTransform; // 存的是本地坐标！
-                    Info.InstanceStartIndex = StartIdx;
+                    Info.GridCode = GridCode; // 记得存到 Info 里
+                    Info.GridTransform = RenderTransform;
+                    Info.InstanceStartIndex = NewIdx;
                     NewPackage.SuspectedFreeGrids.Add(Info);
+
+                    // [新增] 记录绿色映射
+                    NewPackage.FreeInstanceToCodeMap.Add(NewIdx, GridCode);
                 }
             }
 
@@ -312,12 +348,15 @@ void AGeoSOTISMManager::ProcessRealTimeDetection(const FVector& PlayerLocation, 
                 // === 发现障碍 ===
 
                 // A. 隐藏绿色 (操作 ISM 使用 Local Transform)
+                int32 NewOccupiedIndex = Package.OccupiedISM->GetInstanceCount();
+                
                 FTransform ZeroTransform;
                 ZeroTransform.SetScale3D(FVector::ZeroVector);
                 Package.FreeISM->UpdateInstanceTransform(Info.InstanceStartIndex, ZeroTransform, true, false);
 
                 // B. 新增红色 (ISM AddInstance 默认就是 Local，所以直接传 Info.GridTransform)
-                Package.OccupiedISM->AddInstance(LocalTransform, false);
+                int32 ActualNewIndex = Package.OccupiedISM->AddInstance(LocalTransform, false);
+                Package.OccupiedInstanceToCodeMap.Add(ActualNewIndex, Info.GridCode);
 
                 IndicesToRemove.Add(i);
             }
@@ -368,4 +407,35 @@ FVector AGeoSOTISMManager::LlhToUnreal(double Lon, double Lat, double Alt)
         return Georeference->TransformLongitudeLatitudeHeightPositionToUnreal(FVector(Lon, Lat, Alt));
     }
     return FVector::ZeroVector;
+}
+
+
+int64 AGeoSOTISMManager::GetGeoSOTCodeByHit(UPrimitiveComponent* HitComponent, int32 HitItem)
+{
+    if (!HitComponent || HitItem == -1) return -1;
+    
+    UInstancedStaticMeshComponent* HitISM = Cast<UInstancedStaticMeshComponent>(HitComponent);
+    if (!HitISM) return -1;
+
+    // 遍历所有 Chunk 寻找该组件
+    for (auto& Pair : ChunkMap)
+    {
+        const FChunkPackage& Package = Pair.Value;
+
+        if (Package.FreeISM == HitISM)
+        {
+            if (Package.FreeInstanceToCodeMap.Contains(HitItem))
+            {
+                return Package.FreeInstanceToCodeMap[HitItem];
+            }
+        }
+        else if (Package.OccupiedISM == HitISM)
+        {
+            if (Package.OccupiedInstanceToCodeMap.Contains(HitItem))
+            {
+                return Package.OccupiedInstanceToCodeMap[HitItem];
+            }
+        }
+    }
+    return -1;
 }
