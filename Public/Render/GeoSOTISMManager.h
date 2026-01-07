@@ -12,6 +12,7 @@
 // 用于存储"疑似空闲"的网格数据，以便后续进行实时重检
 struct FSimpleGridInfo
 {
+    int64 GridCode; // [新增] 数据库主键 / 唯一标识
     FTransform GridTransform; // 包含 Location(中心), Rotation(方向), Scale(大小)
     int32 InstanceStartIndex; // 在 FreeISM 中的实例索引
 };

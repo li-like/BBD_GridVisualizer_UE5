@@ -1,5 +1,6 @@
 ﻿#include "Core/GeoSOTUtils.h"
 #include <cmath>
+#include "CesiumGeoreference.h"
 
 double UGeoSOTUtils::GetDegSpan(int32 Level)
 {
@@ -114,4 +115,53 @@ TArray<FGeoSOTCell> UGeoSOTUtils::GetGridsInRadius3D(
     double MaxH = CenterAlt + RadiusMeters;
 
     return GenerateGridsByRange3D(Start, End, MinH, MaxH, Level);
+}
+
+
+int64 UGeoSOTUtils::GetGridCodeID(const FGeoSOTCell& Cell)
+{
+    // 简单的 ID 生成策略：高32位存Row，低32位存Col
+    // 实际 GeoSOT 编码可能更复杂(Z-order)，但目前这个足够唯一标识
+    return ((int64)Cell.Code.Row << 32) | (int64)Cell.Code.Col;
+}
+
+bool UGeoSOTUtils::CalculateGridWorldTransform(
+    ACesiumGeoreference* GeoRef,
+    const FGeoSOTCell& Cell,
+    FVector& OutCenterWorld,
+    FQuat& OutRotationWorld,
+    FVector& OutScale)
+{
+    if (!GeoRef) return false;
+
+    // 1. 计算中心点 (World)
+    double CenterLon = (Cell.MinLon + Cell.MaxLon) * 0.5;
+    double CenterLat = (Cell.MinLat + Cell.MaxLat) * 0.5;
+    double CenterAlt = (Cell.MinHeight + Cell.MaxHeight) * 0.5;
+    
+    OutCenterWorld = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(FVector(CenterLon, CenterLat, CenterAlt));
+
+    // 2. 计算方向向量 (World) - 局部切线系
+    // 北向点
+    FVector NorthPos = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(FVector(CenterLon, Cell.MaxLat, CenterAlt));
+    // 东向点
+    FVector EastPos  = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(FVector(Cell.MaxLon, CenterLat, CenterAlt));
+    // 天向点
+    FVector UpPos    = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(FVector(CenterLon, CenterLat, Cell.MaxHeight));
+
+    FVector DirNorth = (NorthPos - OutCenterWorld);
+    FVector DirEast  = (EastPos - OutCenterWorld);
+    FVector DirUp    = (UpPos - OutCenterWorld);
+
+    // 3. 构建旋转 (World)
+    // 使用 MakeFromXY 确保正交化，X指向北，Y指向东
+    OutRotationWorld = FRotationMatrix::MakeFromXY(DirNorth, DirEast).ToQuat();
+
+    // 4. 计算缩放 (物理尺寸 / 50.0f)
+    // 标准 Cube 半径 50，所以用物理半长除以 50
+    OutScale.X = DirNorth.Size() / 50.0f; 
+    OutScale.Y = DirEast.Size() / 50.0f;   
+    OutScale.Z = DirUp.Size() / 50.0f;
+
+    return true;
 }

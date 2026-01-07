@@ -204,31 +204,19 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
 
             for (const FGeoSOTCell& Grid : SubGrids)
             {
-                // --- A. 计算【世界空间】参数 (用于物理检测) ---
-                
-                // 1. 计算中心点 (World)
-                double CenterLon = (Grid.MinLon + Grid.MaxLon) * 0.5;
-                double CenterLat = (Grid.MinLat + Grid.MaxLat) * 0.5;
-                double CenterAlt = (Grid.MinHeight + Grid.MaxHeight) * 0.5;
-                FVector CenterPos_World = LlhToUnreal(CenterLon, CenterLat, CenterAlt);
-
-                // 2. 计算方向向量 (World)
-                FVector NorthPos_World = LlhToUnreal(CenterLon, Grid.MaxLat, CenterAlt);
-                FVector EastPos_World  = LlhToUnreal(Grid.MaxLon, CenterLat, CenterAlt);
-                FVector UpPos_World    = LlhToUnreal(CenterLon, CenterLat, Grid.MaxHeight);
-
-                FVector DirNorth_World = (NorthPos_World - CenterPos_World);
-                FVector DirEast_World  = (EastPos_World - CenterPos_World);
-                FVector DirUp_World    = (UpPos_World - CenterPos_World);
-
-                // 3. 构建旋转 (World) - 修正偏移的核心
-                FQuat GridQuat_World = FRotationMatrix::MakeFromXY(DirNorth_World, DirEast_World).ToQuat();
-
-                // 4. 计算缩放 (物理尺寸 / 50)
+                // === [核心解耦] 调用 Utils 获取世界变换 ===
+                FVector CenterPos_World;
+                FQuat GridQuat_World;
                 FVector NewScale;
-                NewScale.X = DirNorth_World.Size() / 50.0f; 
-                NewScale.Y = DirEast_World.Size() / 50.0f;   
-                NewScale.Z = DirUp_World.Size() / 50.0f;
+
+                // 这一步封装了所有复杂的几何计算
+                if (!UGeoSOTUtils::CalculateGridWorldTransform(Georeference, Grid, CenterPos_World, GridQuat_World, NewScale))
+                {
+                    continue;
+                }
+
+                // === [新增] 获取唯一 ID ===
+                int64 GridCode = UGeoSOTUtils::GetGridCodeID(Grid);
 
                 // --- B. 转换为【本地空间】参数 (用于 ISM 渲染) ---
                 // [核心修复] 使用 InverseTransformPosition
@@ -261,6 +249,7 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                     BatchFreeTransforms.Add(RenderTransform);
 
                     FSimpleGridInfo Info;
+                    Info.GridCode = GridCode; // [新增] 存下 ID
                     Info.GridTransform = RenderTransform; // 存的是本地坐标！
                     Info.InstanceStartIndex = StartIdx;
                     NewPackage.SuspectedFreeGrids.Add(Info);
