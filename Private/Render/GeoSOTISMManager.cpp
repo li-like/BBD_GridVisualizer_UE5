@@ -13,7 +13,6 @@ AGeoSOTISMManager::AGeoSOTISMManager()
 {
     PrimaryActorTick.bCanEverTick = true;
     bIsUpdatingChunks = false;
-    CurrentRecheckTimer = 0.0f;
     LastUpdateLocation = FVector(0, 0, -99999999); // 确保第一次一定会更新
 
     // 默认加载一个立方体 Mesh，防止 BaseMesh 为空
@@ -58,8 +57,8 @@ void AGeoSOTISMManager::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
+    // 安全检查
     if (!Georeference) return;
-
     APawn* Player = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
     if (!Player) return;
 
@@ -68,20 +67,38 @@ void AGeoSOTISMManager::Tick(float DeltaTime)
     // ---------------------------------------------------------
     // 任务 A: 空间移动更新 (加载/卸载大块 Chunk)
     // ---------------------------------------------------------
-    if (FVector::Dist(CurrentLoc, LastUpdateLocation) > 10000.0f) // 每移动 100米 检查一次 Chunk 边界
+    // 逻辑保持不变：每移动 100米 检查一次是否需要加载新区块
+    if (FVector::Dist(CurrentLoc, LastUpdateLocation) > 10000.0f) 
     {
         UpdateChunks(CurrentLoc);
         LastUpdateLocation = CurrentLoc;
     }
 
     // ---------------------------------------------------------
-    // 任务 B: 实时重检 (动态发现新加载的建筑物)
+    // 任务 B: 实时重检 (逻辑升级：近快远慢)
     // ---------------------------------------------------------
-    CurrentRecheckTimer += DeltaTime;
-    if (CurrentRecheckTimer >= RecheckInterval)
+    
+    // 累加时间
+    NearTimer += DeltaTime;
+    FarTimer += DeltaTime;
+
+    // 1. 检查是否到了"高频检测"的时间点 (例如 0.1s)
+    if (NearTimer >= NearCheckInterval)
     {
-        ProcessRealTimeDetection();
-        CurrentRecheckTimer = 0.0f;
+        // 重置近处计时器
+        NearTimer = 0.0f;
+
+        // 2. 检查是否同时也到了"低频检测"的时间点 (例如 1.0s)
+        bool bCheckFar = false;
+        if (FarTimer >= FarCheckInterval)
+        {
+            FarTimer = 0.0f;
+            bCheckFar = true; // 标记：这一帧也要检查远处
+        }
+
+        // 执行检测
+        // 参数含义：现在玩家在哪里？这一帧是否允许检查远处的网格？
+        ProcessRealTimeDetection(CurrentLoc, bCheckFar);
     }
 }
 
@@ -147,18 +164,18 @@ void AGeoSOTISMManager::UpdateChunks(const FVector& PlayerLocation)
 
 void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell)
 {
-    if (!BaseMesh || !GridMaterial || !OccupiedMaterial) return;
+    if (!BaseMesh || !SafeWireMaterial || !ObstacleWireMaterial) return;
 
     // 参数捕获
     double MinH = MinAltitude;
     double MaxH = LowAltitudeCeiling;
     int32 TargetLevel = RenderLevel;
-    float Thickness = LineThicknessCm;
+
 
     // -------------------------------------------------------------
     // Phase 1: 异步计算 (在后台线程计算成千上万个网格的经纬度)
     // -------------------------------------------------------------
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, ChunkKey, ChunkCell, MinH, MaxH, TargetLevel, Thickness]()
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, ChunkKey, ChunkCell, MinH, MaxH, TargetLevel]()
     {
         // 计算该 Chunk 下所有的细分网格
         TArray<FGeoSOTCell> SubGrids = UGeoSOTUtils::GenerateGridsByRange3D(
@@ -169,7 +186,7 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
         // ---------------------------------------------------------
         // Phase 2: 回到主线程进行渲染和碰撞检测
         // ---------------------------------------------------------
-        AsyncTask(ENamedThreads::GameThread, [this, ChunkKey, SubGrids, Thickness]()
+        AsyncTask(ENamedThreads::GameThread, [this, ChunkKey, SubGrids]()
         {
             // 安全检查：如果 Actor 已经被销毁或 Key 已经被移除了，就停止
             if (!IsValid(this)) return;
@@ -190,18 +207,17 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                 return Comp;
             };
 
-            NewPackage.FreeISM = CreateISM(GridMaterial, FName(*FString::Printf(TEXT("Free_%lld"), ChunkKey)));
-            NewPackage.OccupiedISM = CreateISM(OccupiedMaterial, FName(*FString::Printf(TEXT("Occ_%lld"), ChunkKey)));
+            // 使用你在蓝图中指定的 材质实例
+            NewPackage.FreeISM = CreateISM(SafeWireMaterial, FName(*FString::Printf(TEXT("Free_%lld"), ChunkKey)));
+            NewPackage.OccupiedISM = CreateISM(ObstacleWireMaterial, FName(*FString::Printf(TEXT("Occ_%lld"), ChunkKey)));
 
-            // 3. 批量处理变换数据
             TArray<FTransform> BatchFreeTransforms;
             TArray<FTransform> BatchOccupiedTransforms;
-            
-            // 预留内存优化性能
-            BatchFreeTransforms.Reserve(SubGrids.Num() * 12); 
+
+            BatchFreeTransforms.Reserve(SubGrids.Num()); 
             NewPackage.SuspectedFreeGrids.Reserve(SubGrids.Num());
 
-            // 4. 遍历每个细分网格
+            // 3. 遍历每个细分网格
             for (const FGeoSOTCell& Grid : SubGrids)
             {
                 // 计算中心点和包围盒
@@ -211,108 +227,141 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
 
                 FVector CenterPos = LlhToUnreal(CenterLon, CenterLat, CenterAlt);
                 FVector CornerPos = LlhToUnreal(Grid.MinLon, Grid.MinLat, Grid.MinHeight);
-                FVector Extent = (CenterPos - CornerPos).GetAbs() * 0.95f; // 略微缩小避免边缘误触
+                
+                // Extent 是半长宽 (Half-Extent)
+                FVector Extent = (CenterPos - CornerPos).GetAbs(); 
+                
+                // [技巧] 稍微缩小一点点 (0.95)，这样相邻网格之间会有缝隙，视觉上更清晰
+                Extent *= 0.95f; 
 
-                // 立即进行一次物理检测
+                // 物理检测
                 bool bHit = CheckGridCollision(CenterPos, Extent);
 
-                // 计算 12 条边的 Transform
-                TArray<FTransform> WireTransforms;
-                GetWireframeTransforms(CenterPos, Extent, Thickness, WireTransforms);
+                // =========================================================
+                // [修改重点] 计算单个 Instance 的 Transform
+                // =========================================================
+                // 我们不再画12根线，而是画 1 个盒子。
+                // Unreal 的标准 Cube 大小是 100x100x100。
+                // 我们的 Extent 是半径。直径 = Extent * 2。
+                // 所以 Scale = (Extent * 2) / 100 = Extent / 50。
+                
+                FVector Scale = Extent / 50.0f;
+                FTransform GridTransform(FRotator::ZeroRotator, CenterPos, Scale);
 
                 if (bHit)
                 {
-                    // 障碍物 -> 直接加到红色组件
-                    BatchOccupiedTransforms.Append(WireTransforms);
+                    BatchOccupiedTransforms.Add(GridTransform);
                 }
                 else
                 {
-                    // 空闲 -> 加到绿色组件
-                    // [关键] 记录起始索引，以便后续修改。当前 FreeISM 的数量 + 已经放入 Batch 的数量
+                    // 记录起始索引 (现在是 1对1 关系了，非常简单)
                     int32 StartIdx = NewPackage.FreeISM->GetInstanceCount() + BatchFreeTransforms.Num();
                     
-                    BatchFreeTransforms.Append(WireTransforms);
+                    BatchFreeTransforms.Add(GridTransform);
 
                     // 加入待重检列表
                     FSimpleGridInfo Info;
                     Info.Center = CenterPos;
                     Info.Extent = Extent;
-                    Info.InstanceStartIndex = StartIdx; // 这里存的是这12根线的起始索引
+                    Info.InstanceStartIndex = StartIdx; // 现在这里对应的就是一个 Instance
                     NewPackage.SuspectedFreeGrids.Add(Info);
                 }
             }
 
-            // 5. 提交 ISM 实例
+            // 4. 提交 ISM 实例
             if (BatchFreeTransforms.Num() > 0) NewPackage.FreeISM->AddInstances(BatchFreeTransforms, false);
             if (BatchOccupiedTransforms.Num() > 0) NewPackage.OccupiedISM->AddInstances(BatchOccupiedTransforms, false);
 
-            // 6. 注册到 Map
             ChunkMap.Add(ChunkKey, NewPackage);
         });
     });
 }
 
 // =================================================================
-// 核心逻辑：实时检测与状态修正
+// 核心逻辑：实时检测与状态修正 (升级版)
 // =================================================================
-
-void AGeoSOTISMManager::ProcessRealTimeDetection()
+void AGeoSOTISMManager::ProcessRealTimeDetection(const FVector& PlayerLocation, bool bCheckFarRegions)
 {
     if (ChunkMap.Num() == 0) return;
 
-    // 遍历每一个 Chunk
+    // 预计算距离平方，避免在循环中开方 (性能优化)
+    double RadiusSq = HighPriorityRadius * HighPriorityRadius;
+
+    // 遍历所有 Chunk
     for (auto& Pair : ChunkMap)
     {
         FChunkPackage& Package = Pair.Value;
         
-        // 如果没有待检测的网格，直接跳过
+        // 如果这个 Chunk 里没有"疑似空闲"的网格，直接跳过
         if (Package.SuspectedFreeGrids.Num() == 0) continue;
 
-        TArray<int32> IndicesToRemove; // 记录需要从 Suspected 列表中移除的下标
+        TArray<int32> IndicesToRemove;
 
-        // 倒序遍历（方便删除，虽然后面用 RemoveAllSwap 也可以）
+        // 倒序遍历 (为了方便后续移除)
         for (int32 i = Package.SuspectedFreeGrids.Num() - 1; i >= 0; --i)
         {
             const FSimpleGridInfo& Info = Package.SuspectedFreeGrids[i];
 
-            // 再次检测物理碰撞
+            // --- 步骤 1: 距离判断 ---
+            double DistSq = FVector::DistSquared(Info.Center, PlayerLocation);
+            bool bIsNear = DistSq < RadiusSq;
+
+            // --- 步骤 2: 决策 - 这一帧该不该检测这个网格？---
+            bool bShouldCheck = false;
+
+            if (bIsNear)
+            {
+                // 情况 A: 网格在近处 (500m内)
+                // 因为这个函数只在 NearTimer 触发时调用，所以近处网格总是会被检测
+                bShouldCheck = true; 
+            }
+            else
+            {
+                // 情况 B: 网格在远处 (500m外)
+                // 只有当 FarTimer 也触发了 (bCheckFarRegions == true) 才检测
+                if (bCheckFarRegions)
+                {
+                    bShouldCheck = true;
+                }
+            }
+
+            // 如果判定不需要检测，直接跳过，节省性能
+            if (!bShouldCheck) continue;
+
+            // --- 步骤 3: 物理检测 ---
             if (CheckGridCollision(Info.Center, Info.Extent))
             {
-                // === 发现新障碍物！状态翻转：绿 -> 红 ===
+                // === 发现障碍：绿 -> 红 ===
 
-                // 1. 隐藏绿色线框 (Scale设为0)
-                // 解释：ISM 移除实例会导致后续索引前移，管理极其复杂。
-                // 最高效的方法是将原来的实例缩放为 0，让它看不见。
+                // A. 隐藏绿色实例 (将 Scale 设为 0)
                 FTransform ZeroTransform;
-                ZeroTransform.SetScale3D(FVector::ZeroVector); // 设为 0
+                ZeroTransform.SetScale3D(FVector::ZeroVector);
+                
+                // 注意：这里我们假设一个网格对应一个 Instance (使用 Cube Mesh + Wireframe Material)
+                Package.FreeISM->UpdateInstanceTransform(Info.InstanceStartIndex, ZeroTransform, true, false);
 
-                // 线框有 12 条边，我们需要把这 12 个 Instance 全都隐藏
-                for (int32 EdgeIdx = 0; EdgeIdx < 12; ++EdgeIdx)
-                {
-                    // 注意：UpdateInstanceTransform 最后一个参数 bMarkRenderStateDirty 设为 false
-                    // 我们在循环结束后手动 Mark 一次，性能更好
-                    Package.FreeISM->UpdateInstanceTransform(Info.InstanceStartIndex + EdgeIdx, ZeroTransform, true, false);
-                }
+                // B. 在红色组件中新增一个实例
+                // 重新计算 Scale: Extent 是半长宽，Cube 是 100，所以 Scale = Extent / 50
+                FVector Scale = Info.Extent / 50.0f; 
+                FTransform NewRedTransform(FRotator::ZeroRotator, Info.Center, Scale);
+                
+                Package.OccupiedISM->AddInstance(NewRedTransform, false);
 
-                // 2. 在红色组件中新增线框
-                TArray<FTransform> NewRedTransforms;
-                GetWireframeTransforms(Info.Center, Info.Extent, LineThicknessCm, NewRedTransforms);
-                Package.OccupiedISM->AddInstances(NewRedTransforms, false, false); // 同样暂不刷新渲染
-
-                // 3. 标记该 Info 需要被移除 (因为它已经是红色的了，不需要再检测)
+                // C. 记录需要从列表中移除的索引
                 IndicesToRemove.Add(i);
             }
         }
 
-        // 批量移除已变红的网格数据
+        // --- 步骤 4: 清理数据 ---
         if (IndicesToRemove.Num() > 0)
         {
+            // 批量移除已变红的数据，以后不再检测它们
             for (int32 Index : IndicesToRemove)
             {
-                Package.SuspectedFreeGrids.RemoveAtSwap(Index); // Swap 比 RemoveAt 快，因为顺序不重要
+                Package.SuspectedFreeGrids.RemoveAtSwap(Index);
             }
-
-            // 统一刷新渲染状态
+            
+            // 标记渲染状态更新
             Package.FreeISM->MarkRenderStateDirty();
             Package.OccupiedISM->MarkRenderStateDirty();
         }
@@ -341,7 +390,7 @@ bool AGeoSOTISMManager::CheckGridCollision(const FVector& Center, const FVector&
         Center,
         FQuat::Identity,
         ECC_WorldStatic, 
-        FCollisionShape::MakeBox(Extent*1.5f),
+        FCollisionShape::MakeBox(Extent*0.95f),
         Params
     );
 }
@@ -355,41 +404,3 @@ FVector AGeoSOTISMManager::LlhToUnreal(double Lon, double Lat, double Alt)
     return FVector::ZeroVector;
 }
 
-void AGeoSOTISMManager::GetWireframeTransforms(const FVector& Center, const FVector& Extent, float Thickness, TArray<FTransform>& OutTransforms)
-{
-    // 计算 8 个顶点
-    FVector V[8];
-    FVector MinP = Center - Extent;
-    FVector MaxP = Center + Extent;
-
-    V[0] = FVector(MinP.X, MinP.Y, MinP.Z); 
-    V[1] = FVector(MaxP.X, MinP.Y, MinP.Z); 
-    V[2] = FVector(MaxP.X, MaxP.Y, MinP.Z); 
-    V[3] = FVector(MinP.X, MaxP.Y, MinP.Z); 
-    V[4] = FVector(MinP.X, MinP.Y, MaxP.Z); 
-    V[5] = FVector(MaxP.X, MinP.Y, MaxP.Z); 
-    V[6] = FVector(MaxP.X, MaxP.Y, MaxP.Z); 
-    V[7] = FVector(MinP.X, MaxP.Y, MaxP.Z); 
-
-    auto AddEdge = [&](const FVector& Start, const FVector& End)
-    {
-        FVector Mid = (Start + End) * 0.5f;
-        FVector Dir = End - Start;
-        float Len = Dir.Size();
-        
-        if (Len > 0.1f)
-        {
-            FQuat Rot = FRotationMatrix::MakeFromX(Dir).ToQuat();
-            // 假设 BaseMesh 是 100cm 的 Cube
-            FVector Scale(Len / 100.0f, Thickness / 100.0f, Thickness / 100.0f);
-            OutTransforms.Add(FTransform(Rot, Mid, Scale));
-        }
-    };
-
-    // 底部 4 边
-    AddEdge(V[0], V[1]); AddEdge(V[1], V[2]); AddEdge(V[2], V[3]); AddEdge(V[3], V[0]);
-    // 顶部 4 边
-    AddEdge(V[4], V[5]); AddEdge(V[5], V[6]); AddEdge(V[6], V[7]); AddEdge(V[7], V[4]);
-    // 垂直 4 边
-    AddEdge(V[0], V[4]); AddEdge(V[1], V[5]); AddEdge(V[2], V[6]); AddEdge(V[3], V[7]);
-}

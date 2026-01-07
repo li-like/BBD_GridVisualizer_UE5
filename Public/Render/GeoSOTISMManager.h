@@ -66,10 +66,10 @@ public:
     UStaticMesh* BaseMesh;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Config")
-    UMaterialInterface* GridMaterial; // 绿色 (Free)
+    UMaterialInterface* SafeWireMaterial; // 绿色 (Free)
     
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Config")
-    UMaterialInterface* OccupiedMaterial; // 红色 (Occupied)
+    UMaterialInterface* ObstacleWireMaterial; // 红色 (Occupied)
 
     // =================================================================
     // 核心参数设置
@@ -86,10 +86,7 @@ public:
     // 分块层级 (用于管理加载范围)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Setting")
     int32 ChunkLevel = 10;
-
-    // 线宽 (厘米)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Setting")
-    float LineThicknessCm = 50.0f;
+    
 
     // 垂直渲染范围限制 (米)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Setting")
@@ -98,11 +95,18 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Setting")
     double MinAltitude = 10.0;
 
-    // [新增] 动态重检频率 (秒)
-    // 多少秒对视野内的"绿色"网格进行一次全量复查？
-    // 建议 0.5 ~ 1.0 秒，避免每帧检测太卡
+    // [新增] 高频检测范围 (厘米)
+    //在这个范围内，我们会非常频繁地检测障碍物 (例如 50000 = 500米)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|RealTime")
-    float RecheckInterval = 0.5f;
+    double HighPriorityRadius = 50000.0;
+
+    // [新增] 近处检测间隔 (秒) - 建议 0.1 或 0.05 (极快)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|RealTime")
+    float NearCheckInterval = 0.1f;
+
+    // [新增] 远处检测间隔 (秒) - 建议 1.0 或 2.0 (省性能)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|RealTime")
+    float FarCheckInterval = 1.0f;
 
 private:
     // =================================================================
@@ -116,7 +120,9 @@ private:
     // 状态追踪
     FVector LastUpdateLocation;
     bool bIsUpdatingChunks; // 是否正在生成新的 Chunk (避免重复触发)
-    float CurrentRecheckTimer; // 计时器
+    // [修改] 计时器拆分为两个
+    float NearTimer = 0.0f;
+    float FarTimer = 0.0f;
 
     // =================================================================
     // 核心函数声明
@@ -129,7 +135,7 @@ private:
     void CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell);
     
     // 3. [新增] 实时检测逻辑：遍历现有 Chunk，检查 Cesium 是否加载出了新建筑
-    void ProcessRealTimeDetection();
+    void ProcessRealTimeDetection(const FVector& PlayerLocation,bool bCheckFarRegions);
 
     // 工具：物理检测
     // 返回 true 表示有障碍物
@@ -138,7 +144,5 @@ private:
     // 工具：坐标转换
     FVector LlhToUnreal(double Lon, double Lat, double Alt);
 
-    // 工具：计算线框 Transform
-    // OutTransforms 会被填充 12 个变换（对应立方体的12条棱）
-    void GetWireframeTransforms(const FVector& Center, const FVector& Extent, float Thickness, TArray<FTransform>& OutTransforms);
+
 };
