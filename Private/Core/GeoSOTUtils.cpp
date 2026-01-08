@@ -197,14 +197,21 @@ uint64 UGeoSOTUtils::SpreadBits(uint32 x)
 }
 
 // 辅助函数：逆运算
+// 辅助函数：位收缩 (Inverse Morton Code)
 uint32 UGeoSOTUtils::CompactBits(uint64 x)
 {
+    // 只保留奇数位
     uint64 n = x & 0x5555555555555555;
-    n = (n | (n >> 1))  & 0x3333333333333333;
-    n = (n | (n >> 2))  & 0x0F0F0F0F0F0F0F0F;
-    n = (n | (n >> 8))  & 0x00FF00FF00FF00FF;
-    n = (n | (n >> 16)) & 0x0000FFFF0000FFFF;
-    n = (n | (n >> 32)) & 0x00000000FFFFFFFF;
+    
+    // 开始压缩 (这是标准的 Inverse Morton 算法)
+    // 注意：必须严格按照 1, 2, 4, 8, 16 的顺序进行位移动
+    
+    n = (n ^ (n >> 1))  & 0x3333333333333333;
+    n = (n ^ (n >> 2))  & 0x0F0F0F0F0F0F0F0F;
+    n = (n ^ (n >> 4))  & 0x00FF00FF00FF00FF; // <--- 之前可能漏了这一步或写错了！
+    n = (n ^ (n >> 8))  & 0x0000FFFF0000FFFF;
+    n = (n ^ (n >> 16)) & 0x00000000FFFFFFFF;
+    
     return (uint32)n;
 }
 

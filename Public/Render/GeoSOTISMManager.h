@@ -131,6 +131,19 @@ public:
     UFUNCTION(BlueprintCallable, Category = "GeoSOT|Transform")
     FVector GetWorldLocationFromGridCode(int64 GridCode);
     
+    // [新增] 专门用于渲染路径的 ISM 组件
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Components")
+    UInstancedStaticMeshComponent* PathISM;
+
+    // [新增] 绘制路径的接口
+    // 输入：一串网格编码
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Visualization")
+    void DrawPath(const TArray<int64>& PathCodes);
+
+    // [新增] 清除路径
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Visualization")
+    void ClearPath();
+    
 
 
 private:

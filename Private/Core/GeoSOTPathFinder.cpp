@@ -17,7 +17,7 @@ bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, i
     // 起点或终点如果是障碍，直接放弃
     if (!DB->IsGridWalkable(StartCode) || !DB->IsGridWalkable(EndCode)) 
     {
-        UE_LOG(LogTemp, Warning, TEXT("Start or End is blocked!"));
+        //UE_LOG(LogTemp, Warning, TEXT("Start or End is blocked!"));
         return false;
     }
 
@@ -42,7 +42,7 @@ bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, i
     {
         if (++Steps > MaxSteps) 
         {
-            UE_LOG(LogTemp, Warning, TEXT("Pathfinding timeout!"));
+            //UE_LOG(LogTemp, Warning, TEXT("Pathfinding timeout!"));
             break;
         }
 

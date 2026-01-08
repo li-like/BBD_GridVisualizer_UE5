@@ -22,6 +22,59 @@ AGeoSOTISMManager::AGeoSOTISMManager()
     {
         BaseMesh = CubeAsset.Object;
     }
+    
+    // [新增] 初始化路径 ISM
+    PathISM = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("PathISM"));
+    PathISM->SetupAttachment(RootComponent);
+    PathISM->SetCollisionEnabled(ECollisionEnabled::NoCollision); // 路径只是看的，不需要碰撞
+    PathISM->SetCastShadow(false); // 路径通常发光，不需要投影
+}
+
+// 2. 实现清除函数
+void AGeoSOTISMManager::ClearPath()
+{
+    if (PathISM)
+    {
+        PathISM->ClearInstances();
+    }
+}
+
+// 3. 实现核心渲染函数
+void AGeoSOTISMManager::DrawPath(const TArray<int64>& PathCodes)
+{
+    if (!PathISM) return;
+    
+    // 先清空旧路径
+    ClearPath();
+
+    if (PathCodes.Num() == 0) return;
+
+    // 2. 计算缩放 (Scale)
+    // 假设 L21 层级，动态计算尺寸
+    // 注意：PathCodes[0] 可能是任意层级，最好取第一个点的层级来算
+    int32 R, C, Level, Alt;
+    UGeoSOTUtils::DecodeGeoSOTCode(PathCodes[0], R, C, Level, Alt);
+    
+    double GridSizeMeters = UGeoSOTUtils::GetHeightSpan(Level); 
+    double GridSizeUE = GridSizeMeters * 100.0; // 厘米
+
+    // 假设 BaseMesh 是 100x100x100 的立方体
+    FVector InstanceScale(GridSizeUE / 100.0);
+
+    for (int64 Code : PathCodes)
+    {
+        // 1. 利用我们上一轮写好的逆变换函数获取中心点
+        FVector Location = GetWorldLocationFromGridCode(Code);
+
+        // 2. 构造 Transform
+        FTransform InstanceTransform;
+        InstanceTransform.SetLocation(Location);
+        InstanceTransform.SetRotation(FQuat::Identity);
+        InstanceTransform.SetScale3D(InstanceScale);
+
+        // 3. 添加实例
+        PathISM->AddInstance(InstanceTransform, true);
+    }
 }
 
 void AGeoSOTISMManager::BeginPlay()
@@ -179,9 +232,9 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
             // 我们需要用这个把计算出的世界坐标转回本地坐标，传给 ISM
             FTransform ActorTransform = GetActorTransform();
             
-            // [调试信息] 打印 Actor 位置，观察是否被 Cesium 接管 (非0即被接管)
-            UE_LOG(LogTemp, Warning, TEXT("[GeoSOT Debug] Chunk %lld Generating. Actor Loc: %s"), 
-                ChunkKey, *ActorTransform.GetLocation().ToString());
+            // // [调试信息] 打印 Actor 位置，观察是否被 Cesium 接管 (非0即被接管)
+            // UE_LOG(LogTemp, Warning, TEXT("[GeoSOT Debug] Chunk %lld Generating. Actor Loc: %s"), 
+            //     ChunkKey, *ActorTransform.GetLocation().ToString());
 
             // 初始化组件包
             FChunkPackage NewPackage;
@@ -235,23 +288,23 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                 int64 GridCode = UGeoSOTUtils::GenerateGeoSOTCode(Grid.Code.Row, Grid.Code.Col, Grid.Code.Level,AltLayerIndex);
                 // ================= [调试代码开始] =================
                 // 每个 Chunk 只打印前 10 个网格的编码详情
-                if (DebugCount < 10)
-                {
-                    // 将 Code 转为二进制字符串，方便检查位交叉是否正确
-                    FString BinaryStr = "";
-                    for (int32 i = 63; i >= 0; --i)
-                    {
-                        BinaryStr += ((GridCode >> i) & 1) ? TEXT("1") : TEXT("0");
-                    }
-
-                    UE_LOG(LogTemp, Warning, TEXT("[GeoSOT Check] Level: %d | Row: %d | Col: %d => Code: %lld"), 
-                        Grid.Code.Level, Grid.Code.Row, Grid.Code.Col, GridCode);
-                    
-                    // 如果你想看更详细的二进制结构，取消下面这行的注释
-                    UE_LOG(LogTemp, Log, TEXT("    Binary: %s"), *BinaryStr);
-
-                    DebugCount++;
-                }
+                // if (DebugCount < 10)
+                // {
+                //     // 将 Code 转为二进制字符串，方便检查位交叉是否正确
+                //     FString BinaryStr = "";
+                //     for (int32 i = 63; i >= 0; --i)
+                //     {
+                //         BinaryStr += ((GridCode >> i) & 1) ? TEXT("1") : TEXT("0");
+                //     }
+                //
+                //     UE_LOG(LogTemp, Warning, TEXT("[GeoSOT Check] Level: %d | Row: %d | Col: %d => Code: %lld"), 
+                //         Grid.Code.Level, Grid.Code.Row, Grid.Code.Col, GridCode);
+                //     
+                //     // 如果你想看更详细的二进制结构，取消下面这行的注释
+                //     UE_LOG(LogTemp, Log, TEXT("    Binary: %s"), *BinaryStr);
+                //
+                //     DebugCount++;
+                // }
                 // ================= [调试代码结束] =================
 
                 // --- B. 转换为【本地空间】参数 (用于 ISM 渲染) ---
@@ -266,14 +319,14 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                 if (!bLoggedDebug)
                 {
                     float OffsetDist = FVector::Dist(CenterPos_World, CenterPos_Local);
-                    UE_LOG(LogTemp, Log, TEXT("   [Grid Debug] World: %s | Local: %s | Offset: %f"), 
-                        *CenterPos_World.ToString(), *CenterPos_Local.ToString(), OffsetDist);
+                    // UE_LOG(LogTemp, Log, TEXT("   [Grid Debug] World: %s | Local: %s | Offset: %f"), 
+                    //     *CenterPos_World.ToString(), *CenterPos_Local.ToString(), OffsetDist);
                     bLoggedDebug = true;
                 }
 
                 // --- C. 物理检测 (必须用世界坐标) ---
                 FVector BoxExtent = NewScale * 50.0f; 
-                bool bHit = CheckGridCollision(CenterPos_World, BoxExtent * 0.95f, GridQuat_World);
+                bool bHit = CheckGridCollision(CenterPos_World, BoxExtent * 1.2f, GridQuat_World);
 
                 if (bHit)
                 {

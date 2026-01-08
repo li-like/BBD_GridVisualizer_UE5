@@ -13,7 +13,7 @@ void UMyGeoSOTDatabase::Initialize(FSubsystemCollectionBase& Collection)
     
     if (InitDatabase())
     {
-        UE_LOG(LogTemp, Log, TEXT("[DB] Database initialized at: %s"), *DbPath);
+        //UE_LOG(LogTemp, Log, TEXT("[DB] Database initialized at: %s"), *DbPath);
         LoadMapToCache(); // 启动时加载缓存
     }
 }
@@ -28,7 +28,7 @@ bool UMyGeoSOTDatabase::InitDatabase()
 {
     if (!Database.Open(*DbPath, ESQLiteDatabaseOpenMode::ReadWriteCreate))
     {
-        UE_LOG(LogTemp, Error, TEXT("[DB] Failed to open database!"));
+        //UE_LOG(LogTemp, Error, TEXT("[DB] Failed to open database!"));
         return false;
     }
 
@@ -99,10 +99,10 @@ void UMyGeoSOTDatabase::LoadMapToCache()
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("[DB] Failed to prepare statement: %s"), *Database.GetLastError());
+        //UE_LOG(LogTemp, Error, TEXT("[DB] Failed to prepare statement: %s"), *Database.GetLastError());
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[DB] Loaded %d obstacles into cache."), ObstacleCache.Num());
+    //UE_LOG(LogTemp, Log, TEXT("[DB] Loaded %d obstacles into cache."), ObstacleCache.Num());
 }
 
 bool UMyGeoSOTDatabase::IsGridWalkable(int64 GridID)
