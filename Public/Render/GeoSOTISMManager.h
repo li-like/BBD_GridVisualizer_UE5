@@ -116,6 +116,22 @@ public:
     // False: 只读取或不操作数据库 (运行阶段用)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Config")
     bool bIsBakingMode = true;
+    
+    /**
+     * [新增] 世界坐标 -> GeoSOT 编码
+     * 用于将起终点坐标转换为网格 ID
+     */
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Transform")
+    int64 GetGridCodeFromWorldLocation(FVector WorldLoc);
+
+    /**
+     * [新增] GeoSOT 编码 -> 世界坐标
+     * 用于将 A* 算出的路径 ID 还原为世界坐标进行渲染
+     */
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Transform")
+    FVector GetWorldLocationFromGridCode(int64 GridCode);
+    
+
 
 private:
     // =================================================================

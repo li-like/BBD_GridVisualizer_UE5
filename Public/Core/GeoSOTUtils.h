@@ -52,8 +52,23 @@ public:
 	// [新增] 将 Row/Col 转换为 GeoSOT Z-order 编码 (64位)
 	static int64 GenerateGeoSOTCode(int32 Row, int32 Col, int32 Level, int32 AltIndex);
 
-	// [新增] 解析编码回 Row/Col (用于验证或解码)
-	static void DecodeGeoSOTCode(int64 Code, int32& OutRow, int32& OutCol, int32& OutLevel);
+	// [新增] 解码：从 Code 还原出坐标
+	static void DecodeGeoSOTCode(int64 Code, int32& OutRow, int32& OutCol, int32& OutLevel, int32& OutAltLayer);
+
+	// [新增] 获取 3D 邻居 (上下东南西北)
+	static void GetNeighbors3D(int64 CurrentCode, int32 Level, TArray<int64>& OutNeighbors);
+	
+	/**
+	 * [新增] 逆向计算：从 Row/Col 算出 GeoSOT 网格中心点的经纬度
+	 * 基于 GeoSOT 标准 512度 扩展域 [-256, 256]
+	 */
+	static void GetGeoSOTCenter(int32 Row, int32 Col, int32 Level, double& OutLat, double& OutLon);
+
+	/**
+	 * [新增] 正向计算：从 经纬度 算出对应的 Row/Col 索引
+	 * 基于 GeoSOT 标准 512度 扩展域
+	 */
+	static void LatLonToGeoSOT(double Lat, double Lon, int32 Level, int32& OutRow, int32& OutCol);
 	
 	// [新增] 核心解耦函数：计算网格在 UE 世界空间中的物理变换
 	// 输入：地理引用、网格数据

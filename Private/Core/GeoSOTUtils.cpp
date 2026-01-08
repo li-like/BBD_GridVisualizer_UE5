@@ -207,3 +207,86 @@ uint32 UGeoSOTUtils::CompactBits(uint64 x)
     n = (n | (n >> 32)) & 0x00000000FFFFFFFF;
     return (uint32)n;
 }
+
+void UGeoSOTUtils::DecodeGeoSOTCode(int64 Code, int32& OutRow, int32& OutCol, int32& OutLevel, int32& OutAltLayer)
+{
+    // 1. 提取高度 (低16位)
+    OutAltLayer = (int32)(Code & 0xFFFF);
+
+    // 2. 提取 2D Morton 码 (高位)
+    int64 Morton2D = Code >> 16;
+
+    // 3. 分离 Row 和 Col
+    // Morton = (Row << 1) | Col
+    // Row 在奇数位，Col 在偶数位
+    
+    // 提取 Col (偶数位)
+    OutCol = CompactBits(Morton2D);
+    
+    // 提取 Row (奇数位 -> 右移1位变成偶数位 -> Compact)
+    OutRow = CompactBits(Morton2D >> 1);
+
+    // Level 通常不存就在 Code 里 (除非你以前存了)，这里假设由外部传入或固定
+    // 如果你之前的 Generate 把 Level 存在了更高位，这里也要相应提取
+    // 目前我们先透传
+    OutLevel = 21; // 默认或者从参数获取
+}
+
+void UGeoSOTUtils::GetNeighbors3D(int64 CurrentCode, int32 Level, TArray<int64>& OutNeighbors)
+{
+    int32 R, C, L, Alt;
+    DecodeGeoSOTCode(CurrentCode, R, C, L, Alt);
+
+    // 6 邻域偏移
+    int32 Offsets[6][3] = {
+        {1,0,0}, {-1,0,0}, // 北, 南 (Row变化)
+        {0,1,0}, {0,-1,0}, // 东, 西 (Col变化)
+        {0,0,1}, {0,0,-1}  // 上, 下 (Alt变化)
+    };
+
+    for(int i=0; i<6; i++)
+    {
+        int32 NewR = R + Offsets[i][0];
+        int32 NewC = C + Offsets[i][1];
+        int32 NewAlt = Alt + Offsets[i][2];
+
+        // 简单的边界检查 (防止 Alt < 0)
+        if (NewAlt < 0) continue; 
+
+        // 重新编码
+        OutNeighbors.Add(GenerateGeoSOTCode(NewR, NewC, Level, NewAlt));
+    }
+}
+
+void UGeoSOTUtils::GetGeoSOTCenter(int32 Row, int32 Col, int32 Level, double& OutLat, double& OutLon)
+{
+    // GeoSOT 定义：地球空间被扩展为 512° x 512°
+    // 逻辑区间为 [-256, 256]
+    // 每一格的度数跨度 (Step) = 512 / 2^Level
+    
+    // 注意：1LL << Level 是为了防止 Level 较大时 int32 溢出，虽然 L21 不会溢出，但好习惯很重要
+    double Step = 512.0 / (double)(1LL << Level); 
+
+    // 计算中心点公式：
+    // Min = Index * Step - 256
+    // Center = Min + Step/2 = (Index + 0.5) * Step - 256
+    
+    OutLat = ((double)Row + 0.5) * Step - 256.0;
+    OutLon = ((double)Col + 0.5) * Step - 256.0;
+}
+
+void UGeoSOTUtils::LatLonToGeoSOT(double Lat, double Lon, int32 Level, int32& OutRow, int32& OutCol)
+{
+    // 1. 将经纬度从 [-256, 256] 映射到 [0, 512] 的正数空间
+    // 真实的经纬度范围是 Lat[-90, 90], Lon[-180, 180]
+    // 但 GeoSOT 算法统一加 256 处理
+    double OffsetLat = Lat + 256.0;
+    double OffsetLon = Lon + 256.0;
+
+    // 2. 计算当前层级的步长 (网格分辨率)
+    double Step = 512.0 / (double)(1LL << Level);
+
+    // 3. 计算索引 (向下取整)
+    OutRow = (int32)(OffsetLat / Step);
+    OutCol = (int32)(OffsetLon / Step);
+}

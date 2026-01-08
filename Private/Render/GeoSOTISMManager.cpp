@@ -431,4 +431,74 @@ FVector AGeoSOTISMManager::LlhToUnreal(double Lon, double Lat, double Alt)
     return FVector::ZeroVector;
 }
 
+// 1. 世界坐标 -> GeoSOT 编码 (World -> Code)
+int64 AGeoSOTISMManager::GetGridCodeFromWorldLocation(FVector WorldLoc)
+{
+    // 检查 Cesium 引用
+    if (!Georeference) 
+    {
+        return -1;
+    }
+
+    // Step 1: UE 坐标 -> 经纬度高度 (Lon, Lat, Height)
+    FVector3d LLH = Georeference->TransformUnrealPositionToLongitudeLatitudeHeight(FVector3d(WorldLoc));
+
+    double Lon = LLH.X;
+    double Lat = LLH.Y;
+    double Height = LLH.Z;
+
+    // Step 2: 经纬度 -> 2D 索引 (Row, Col)
+    // 统一使用 L21 进行规划 (或者你可以将 TargetLevel 提升为参数)
+    int32 TargetLevel = 21; 
+    int32 Row, Col;
+    UGeoSOTUtils::LatLonToGeoSOT(Lat, Lon, TargetLevel, Row, Col);
+
+    // Step 3: 高度 -> 高度层索引 (AltLayer)
+    // [关键修正] 调用 Utils 中已存在的标准函数获取层高
+    double CurrentLayerSpan = UGeoSOTUtils::GetHeightSpan(TargetLevel);
+
+    // 高度检查
+    if (Height < MinAltitude) 
+    {
+        // 如果低于基准高度，返回无效
+        return -1; 
+    }
+
+    // 计算层号
+    int32 AltLayer = FMath::FloorToInt((Height - MinAltitude) / CurrentLayerSpan);
+
+    // Step 4: 生成编码
+    return UGeoSOTUtils::GenerateGeoSOTCode(Row, Col, TargetLevel, AltLayer);
+}
+
+// 2. GeoSOT 编码 -> 世界坐标 (Code -> World)
+FVector AGeoSOTISMManager::GetWorldLocationFromGridCode(int64 GridCode)
+{
+    if (!Georeference) return FVector::ZeroVector;
+
+    // Step 1: 解码
+    int32 Row, Col, Level, AltLayer;
+    UGeoSOTUtils::DecodeGeoSOTCode(GridCode, Row, Col, Level, AltLayer);
+
+    // Step 2: 还原经纬度中心
+    double CenterLat, CenterLon;
+    UGeoSOTUtils::GetGeoSOTCenter(Row, Col, Level, CenterLat, CenterLon);
+
+    // Step 3: 还原高度中心
+    // [关键修正] 使用 Level 对应的标准高度跨度
+    double CurrentLayerSpan = UGeoSOTUtils::GetHeightSpan(Level);
+
+    // 高度 = 基准 + (层号 + 0.5) * 层高
+    // +0.5 是为了取体素的几何中心
+    double CenterHeight = MinAltitude + ((double)AltLayer + 0.5) * CurrentLayerSpan;
+
+    // Step 4: 转回 UE 坐标
+    // Cesium 输入顺序: Lon, Lat, Height
+    FVector3d WorldPos = Georeference->TransformLongitudeLatitudeHeightPositionToUnreal(
+        FVector3d(CenterLon, CenterLat, CenterHeight)
+    );
+
+    return (FVector)WorldPos;
+}
+
 
