@@ -4,6 +4,7 @@
 #include "Core/GeoSOTUtils.h"
 #include "Core/MyGeoSOTDatabase.h"
 #include "DrawDebugHelpers.h" // <--- 必须引入
+#include "Simulation/SwarmManager.h"
 #include "Kismet/GameplayStatics.h"
 
 AGeoSOTPathTester::AGeoSOTPathTester()
@@ -97,7 +98,7 @@ void AGeoSOTPathTester::RunPathFindingTest()
     FVector CameraLoc = GetWorld()->GetFirstPlayerController()->PlayerCameraManager->GetCameraLocation();
     
     // 获取网格编码
-    int64 StartCode = GeoSOTManager->GetGridCodeFromWorldLocation(CameraLoc);
+    StartCode = GeoSOTManager->GetGridCodeFromWorldLocation(CameraLoc);
 
     if (StartCode == -1)
     {
@@ -124,7 +125,7 @@ void AGeoSOTPathTester::RunPathFindingTest()
     int32 R, C, L, Alt;
     UGeoSOTUtils::DecodeGeoSOTCode(StartCode, R, C, L, Alt);
 
-    int64 EndCode = -1;
+    EndCode = -1;
     // 尝试向 Row+50, Col+50 的方向移动，直到找到一个空气网格
     for (int i = 50; i < 150; i++) 
     {
@@ -150,12 +151,28 @@ void AGeoSOTPathTester::RunPathFindingTest()
     UE_LOG(LogTemp, Error, TEXT("========== 3. A* EXECUTION & VERIFICATION =========="));
 
     // 3. 执行 A*
-    TArray<int64> PathResult;
     bool bFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, PathResult);
 
     if (bFound)
     {
         UE_LOG(LogTemp, Warning, TEXT("Path Found! Nodes: %d. Verifying validity..."), PathResult.Num());
+        // ==========================================
+        // [新增] 通知 SwarmManager 接力
+        // ==========================================
+        if (LinkedSwarmManager && PathResult.Num() > 0)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[PathTester] Handing over to SwarmManager..."));
+        
+            // 直接调用 Manager 的接口，把算好的路径传过去
+            LinkedSwarmManager->SpawnAndCommandDrone(PathResult);
+        }
+        else
+        {
+            if (!LinkedSwarmManager)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[PathTester] Path ready, but no SwarmManager linked. Drone will not fly."));
+            }
+        }
 
         // 4. 路径全量反查 (验证是否存在穿墙 Bug)
         for (int i = 0; i < PathResult.Num(); i++)
