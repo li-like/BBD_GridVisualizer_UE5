@@ -128,7 +128,7 @@ void AGeoSOTPathTester::RunPathFindingTest()
     // 尝试向 Row+50, Col+50 的方向移动，直到找到一个空气网格
     for (int i = 50; i < 150; i++) 
     {
-        int64 TestCode = UGeoSOTUtils::GenerateGeoSOTCode(R + i, C + i, L, Alt);
+        int64 TestCode = UGeoSOTUtils::GenerateGeoSOTCode(R + i, C + i, L, Alt+10);
         
         // 关键：必须确保终点本身不是障碍物，否则 A* 直接失败
         if (DB->IsGridWalkable(TestCode))
@@ -191,18 +191,18 @@ void AGeoSOTPathTester::RunPathFindingTest()
                 int32 tR, tC, tL, tAlt;
                 UGeoSOTUtils::DecodeGeoSOTCode(Code, tR, tC, tL, tAlt);
                 
-                if (bIsObstacleInDB)
-                {
-                    //UE_LOG(LogTemp, Error, 
-                    TEXT("Node %d: %s Code=%lld | Idx=(%d,%d,%d) | Pos=%s"), 
-                    i, *StatusStr, Code, tR, tC, tAlt, *NodePos.ToString());
-                }
-                else
-                {
-                    //UE_LOG(LogTemp, Warning, 
-                    TEXT("Node %d: %s Code=%lld | Idx=(%d,%d,%d) | Pos=%s"), 
-                    i, *StatusStr, Code, tR, tC, tAlt, *NodePos.ToString());
-                }
+                // if (bIsObstacleInDB)
+                // {
+                //     //UE_LOG(LogTemp, Error, 
+                //     TEXT("Node %d: %s Code=%lld | Idx=(%d,%d,%d) | Pos=%s"), 
+                //     i, *StatusStr, Code, tR, tC, tAlt, *NodePos.ToString());
+                // }
+                // else
+                // {
+                //     //UE_LOG(LogTemp, Warning, 
+                //     TEXT("Node %d: %s Code=%lld | Idx=(%d,%d,%d) | Pos=%s"), 
+                //     i, *StatusStr, Code, tR, tC, tAlt, *NodePos.ToString());
+                // }
                 
             }
 
