@@ -109,8 +109,13 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|RealTime")
     float FarCheckInterval = 1.0f;
     
-    UFUNCTION(BlueprintCallable, Category = "GeoSOT")
-    int64 GetGeoSOTCodeByHit(UPrimitiveComponent* HitComponent, int32 HitItem);
+
+    
+    // [新增] 烘焙模式开关
+    // True: 扫描并写入数据库 (开发阶段用)
+    // False: 只读取或不操作数据库 (运行阶段用)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Config")
+    bool bIsBakingMode = true;
 
 private:
     // =================================================================

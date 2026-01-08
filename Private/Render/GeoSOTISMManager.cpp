@@ -4,6 +4,7 @@
 #include "Async/Async.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "Core/MyGeoSOTDatabase.h"
 #include "UObject/ConstructorHelpers.h"
 
 // 构造函数
@@ -165,6 +166,14 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
         AsyncTask(ENamedThreads::GameThread, [this, ChunkKey, SubGrids]()
         {
             if (!IsValid(this)) return;
+            
+            // === [新增 1] 获取数据库子系统 ===
+            UMyGeoSOTDatabase* DB = nullptr;
+            if (bIsBakingMode) // 只有开启烘焙模式才连接数据库
+            {
+                DB = GetGameInstance()->GetSubsystem<UMyGeoSOTDatabase>();
+                if (DB) DB->BeginTransaction(); // [关键] 开启事务！否则写入几千条会卡顿数秒
+            }
 
             // --- [关键 Step 1] 获取 Actor 当前的世界变换 ---
             // 我们需要用这个把计算出的世界坐标转回本地坐标，传给 ISM
@@ -268,6 +277,13 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
 
                 if (bHit)
                 {
+                    
+                    // === [新增 3] 存入数据库 ===
+                    if (bIsBakingMode && DB)
+                    {
+                        // 存入 Code, Level, AltLayer
+                        DB->SaveObstacle(GridCode, Grid.Code.Level, AltLayerIndex);
+                    }
                     // 红色
                     int32 NewIdx = NewPackage.OccupiedISM->GetInstanceCount() + BatchOccupiedTransforms.Num();
                     BatchOccupiedTransforms.Add(RenderTransform);
@@ -290,6 +306,12 @@ void AGeoSOTISMManager::CreateChunk(int64 ChunkKey, const FGeoSOTCell& ChunkCell
                     // [新增] 记录绿色映射
                     NewPackage.FreeInstanceToCodeMap.Add(NewIdx, GridCode);
                 }
+            }
+            
+            // === [新增 4] 提交事务 ===
+            if (bIsBakingMode && DB)
+            {
+                DB->CommitTransaction(); // 一次性把这几百条数据写入磁盘
             }
 
             if (BatchFreeTransforms.Num() > 0) NewPackage.FreeISM->AddInstances(BatchFreeTransforms, false);
@@ -410,32 +432,3 @@ FVector AGeoSOTISMManager::LlhToUnreal(double Lon, double Lat, double Alt)
 }
 
 
-int64 AGeoSOTISMManager::GetGeoSOTCodeByHit(UPrimitiveComponent* HitComponent, int32 HitItem)
-{
-    if (!HitComponent || HitItem == -1) return -1;
-    
-    UInstancedStaticMeshComponent* HitISM = Cast<UInstancedStaticMeshComponent>(HitComponent);
-    if (!HitISM) return -1;
-
-    // 遍历所有 Chunk 寻找该组件
-    for (auto& Pair : ChunkMap)
-    {
-        const FChunkPackage& Package = Pair.Value;
-
-        if (Package.FreeISM == HitISM)
-        {
-            if (Package.FreeInstanceToCodeMap.Contains(HitItem))
-            {
-                return Package.FreeInstanceToCodeMap[HitItem];
-            }
-        }
-        else if (Package.OccupiedISM == HitISM)
-        {
-            if (Package.OccupiedInstanceToCodeMap.Contains(HitItem))
-            {
-                return Package.OccupiedInstanceToCodeMap[HitItem];
-            }
-        }
-    }
-    return -1;
-}
