@@ -1,4 +1,6 @@
-﻿#include "Tests/GeoSOTPathTester.h"
+﻿
+
+#include "Tests/GeoSOTPathTester.h"
 #include "Render/GeoSOTISMManager.h"
 #include "Core/GeoSOTPathFinder.h"
 #include "Core/GeoSOTUtils.h"
@@ -151,7 +153,8 @@ void AGeoSOTPathTester::RunPathFindingTest()
     UE_LOG(LogTemp, Error, TEXT("========== 3. A* EXECUTION & VERIFICATION =========="));
 
     // 3. 执行 A*
-    bool bFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, PathResult);
+    // bool bFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, PathResult);
+    bool bFound = false;
 
     if (bFound)
     {

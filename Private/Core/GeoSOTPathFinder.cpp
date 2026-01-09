@@ -4,7 +4,7 @@
 #include "Core/MyGeoSOTDatabase.h"
 #include "Kismet/GameplayStatics.h"
 
-bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, int64 EndCode, TArray<int64>& OutPathCodes)
+bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, int64 EndCode, TArray<int64>& OutPathCodes,const TSet<int64>& OccupiedGrids)
 {
     // 1. 获取数据库 (检查碰撞用)
     UMyGeoSOTDatabase* DB = nullptr;
@@ -76,6 +76,14 @@ bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, i
 
         for (int64 NeighborCode : Neighbors)
         {
+            
+            // --- [新增逻辑] 冲突检测 ---
+            // 如果这个邻居节点已经被其他无人机预定了，视为障碍物，不可通行
+            // 注意：终点不能被视为障碍物 (防止终点刚好在别人路径边上被误杀，虽大概率不会)
+            if (OccupiedGrids.Contains(NeighborCode) && NeighborCode != EndCode) 
+            {
+                continue; 
+            }
             // 4.1 碰撞检测 (查数据库缓存)
             // 如果不可走，跳过
             if (!DB->IsGridWalkable(NeighborCode)) continue;
@@ -102,6 +110,8 @@ bool UGeoSOTPathFinder::FindPath(const UObject* WorldContext, int64 StartCode, i
 
     return false;
 }
+
+
 
 float UGeoSOTPathFinder::Heuristic(int64 A, int64 B)
 {

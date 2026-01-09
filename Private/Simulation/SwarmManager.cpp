@@ -1,4 +1,5 @@
-﻿#include "Simulation/SwarmManager.h"
+﻿
+#include "Simulation/SwarmManager.h"
 #include "Simulation/SwarmDrone.h"
 
 // --- 引入 Core 模块 ---
@@ -139,8 +140,8 @@ void ASwarmManager::RunSwarmTest()
 
     // --- 3. 核心寻路 (Call Core) ---
     TArray<int64> PathCodes;
-    bool bPathFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, PathCodes);
-
+    // bool bPathFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, PathCodes);
+    bool bPathFound = false;
     if (bPathFound && PathCodes.Num() > 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[SwarmManager] Independent Path Found! Length: %d nodes. Spawning Drone..."), PathCodes.Num());

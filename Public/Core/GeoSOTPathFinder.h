@@ -21,12 +21,13 @@ class GEOSOTSYSTEM_API UGeoSOTPathFinder : public UObject
 public:
 	// 核心寻路函数
 	// 返回 true 表示找到路径
-	UFUNCTION(BlueprintCallable, Category = "GeoSOT|PathFinding")
+	UFUNCTION(BlueprintCallable, Category = "GeoSOT|PathFinding", meta = (AutoCreateRefTerm = "OccupiedGrids"))
 	static bool FindPath(
 		const UObject* WorldContext, 
 		int64 StartCode, 
 		int64 EndCode, 
-		TArray<int64>& OutPathCodes
+		TArray<int64>& OutPathCodes,
+		const TSet<int64>& OccupiedGrids // <--- 移除这里的 = TSet<int64>()
 	);
 
 private:
