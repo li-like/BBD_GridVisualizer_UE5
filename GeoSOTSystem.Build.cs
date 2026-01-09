@@ -29,7 +29,9 @@ public class GeoSOTSystem : ModuleRules
 				"CesiumRuntime",           // 新增：Cesium 核心库
 				"ProceduralMeshComponent",  // 新增：用于生成网格几何体
 				"SQLiteCore", 
-				"SQLiteSupport"
+				"SQLiteSupport",
+				"Sockets", 
+				"Networking"
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
@@ -42,6 +44,7 @@ public class GeoSOTSystem : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
+		        "AirSim"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

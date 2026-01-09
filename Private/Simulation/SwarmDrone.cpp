@@ -1,146 +1,173 @@
 ﻿#include "Simulation/SwarmDrone.h"
-#include "Core/GeoSOTUtils.h" // 引入核心工具库
-#include "CesiumGeoreference.h" // 需要在 Build.cs 中加入 "CesiumRuntime"
-#include "Kismet/GameplayStatics.h"
+#include "Core/GeoSOTUtils.h"
+#include "CesiumGeoreference.h"
+#include "DrawDebugHelpers.h"
 
+// 构造函数
 ASwarmDrone::ASwarmDrone()
 {
-    PrimaryActorTick.bCanEverTick = true;
-
-    // 创建一个小球代表无人机，方便观察 (实际连接 AirSim 后可隐藏)
-    UStaticMeshComponent* MeshComp = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("DroneMesh"));
-    RootComponent = MeshComp;
-    
-    // 加载一个简单的模型 (引擎自带的球体)
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-    if (SphereMesh.Succeeded())
-    {
-        MeshComp->SetStaticMesh(SphereMesh.Object);
-        MeshComp->SetWorldScale3D(FVector(0.5f)); // 直径50cm
-    }
+    // 在这个模式下，我们不需要 Tick，因为是 Python 在控制飞行
+    PrimaryActorTick.bCanEverTick = false; 
 }
 
-void ASwarmDrone::BeginPlay()
+void ASwarmDrone::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    Super::BeginPlay();
+    Super::EndPlay(EndPlayReason);
 }
 
 void ASwarmDrone::ExecuteGeoSOTPath(const TArray<int64>& PathCodes, ACesiumGeoreference* InGeoReference)
 {
     if (!InGeoReference)
     {
-        UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] Error: No GeoReference provided!"));
+        UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] Error: GeoReference is NULL!"));
         return;
     }
-
     this->GeoReference = InGeoReference;
-    
-    UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] Received Path with %d nodes. Converting to World Coordinates..."), PathCodes.Num());
 
-    // 1. 坐标转换 (GeoSOT -> UE World)
+    // 1. 转换坐标 (GeoSOT -> UE World)
     ConvertPathToWaypoints(PathCodes);
 
-    // 2. 启动飞行
+    // 2. 发送给 Python
     if (Waypoints.Num() > 0)
     {
-        CurrentWaypointIndex = 0;
-        bIsFlying = true;
-        // 把无人机瞬间移动到起点 (或者你可以让它飞过去)
-        SetActorLocation(Waypoints[0]);
-        UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] Takeoff! Flying to Node 1..."));
+        SendPathToPython();
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] Warning: Converted path is empty!"));
     }
 }
+
+
 
 void ASwarmDrone::ConvertPathToWaypoints(const TArray<int64>& PathCodes)
 {
     Waypoints.Empty();
-
-    // 为了避免变量名混淆，我们将循环变量命名为 PackedCode
-    for (int64 PackedCode : PathCodes)
+    if (!GeoReference) 
     {
-        // 1. 解码：将 int64 拆解为 (Row, Col, Level, Alt)
-        // 注意：DecodeGeoSOTCode 的参数类型是 int32&，所以我们定义 int32 变量来接收
-        int32 R = 0;
-        int32 C = 0;
-        int32 L = 0;
-        int32 H = 0;
-        UGeoSOTUtils::DecodeGeoSOTCode(PackedCode, R, C, L, H);
+        UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] Error: GeoReference is NULL!"));
+        return;
+    }
 
-        // 2. 构造 Cell 并正确赋值
-        FGeoSOTCell TempCell;
+    UE_LOG(LogTemp, Log, TEXT("[SwarmDrone] Converting %d path nodes using validated GeoSOTUtils..."), PathCodes.Num());
+
+    for (int64 Code : PathCodes)
+    {
+        int32 R, C, L, H;
         
-        // --- 核心修正：访问嵌套结构体并赋值 ---
-        // 这里的 Code 是 FGeoSOTCode 类型的成员变量
-        TempCell.Code.Level = L;
-        TempCell.Code.Row   = R;  // 自动从 int32 提升为 int64
-        TempCell.Code.Col   = C;  // 自动从 int32 提升为 int64
-        TempCell.Code.Alt   = H;  // 自动从 int32 提升为 int64
+        // 1. 解码 (使用你现有的 DecodeGeoSOTCode)
+        // 注意：你目前的 Decode 函数内部写死了 OutLevel = 21
+        // 如果你的 PathCodes 是 L21 生成的，这没问题。
+        // 如果需要动态层级，你需要确保 Decode 逻辑正确。
+        UGeoSOTUtils::DecodeGeoSOTCode(Code, R, C, L, H);
 
-        // 注意：MinLon/MaxLon 等边界信息在这里没有手动计算。
-        // 我们假设 CalculateGridWorldTransform 会根据 TempCell.Code 自动计算中心点，
-        // 或者只需要 Code 就能算出中心点。
+        // 2. 计算经纬度中心 (使用你现有的 GetGeoSOTCenter)
+        double Lat, Lon;
+        UGeoSOTUtils::GetGeoSOTCenter(R, C, L, Lat, Lon);
+
+        // 3. 计算高度
+        // 使用你现有的 GetHeightSpan 公式：1度物理距离 * GridSpanDeg
+        // 这里的逻辑是：H 是高度索引，索引 * 每层高度跨度 = 实际高度
+        double HSpan = UGeoSOTUtils::GetHeightSpan(L);
+        double AltMeters = (double)H * HSpan; 
+
+        // 4. 坐标转换 (Cesium LLH -> Unreal World)
+        // Cesium 函数期望的是 (Longitude, Latitude, Height)
+        FVector3d TargetLLH(Lon, Lat, AltMeters);
         
-        // 3. 调用核心转换函数
-        FVector WorldPos;
-        FQuat WorldRot;
-        FVector WorldScale;
+        // 核心：利用 Cesium GeoReference 进行精确转换
+        FVector WorldPos = GeoReference->TransformLongitudeLatitudeHeightPositionToUnreal(TargetLLH);
 
-        bool bSuccess = UGeoSOTUtils::CalculateGridWorldTransform(
-            GeoReference,
-            TempCell,
-            WorldPos,
-            WorldRot,
-            WorldScale
-        );
-
-        if (bSuccess)
+        Waypoints.Add(WorldPos);
+    }
+    
+    // --- [调试校验] ---
+    if (Waypoints.Num() >= 2)
+    {
+        FVector P0 = Waypoints[0];
+        FVector P1 = Waypoints[1];
+        float Dist = FVector::Dist(P0, P1);
+        UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] Conversion Verify: P0=%s, P1=%s, Dist=%.2f cm"), 
+            *P0.ToString(), *P1.ToString(), Dist);
+            
+        if (Dist < 0.1f) // 如果两点距离小于 1毫米，说明转换可能有问题（或者路径本身就在原地）
         {
-            Waypoints.Add(WorldPos);
+             UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] CRITICAL WARNING: Adjacent path points are identical! Check Level/Decoding logic."));
         }
     }
 }
 
-void ASwarmDrone::Tick(float DeltaTime)
+void ASwarmDrone::SendPathToPython()
 {
-    Super::Tick(DeltaTime);
+    // --- 1. 创建 Socket (保持不变) ---
+    ISocketSubsystem* SocketSubs = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    FSocket* Socket = SocketSubs->CreateSocket(NAME_Stream, TEXT("AirSimConnector"), false);
+    
+    if (!Socket) return;
 
-    if (bIsFlying)
+    TSharedRef<FInternetAddr> Addr = SocketSubs->CreateInternetAddr();
+    bool bIsValid;
+    Addr->SetIp(TEXT("127.0.0.1"), bIsValid);
+    Addr->SetPort(8888);
+
+    UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] Connecting to Python..."));
+    
+    if (!Socket->Connect(*Addr))
     {
-        ProcessFlightControl(DeltaTime);
-    }
-}
-
-void ASwarmDrone::ProcessFlightControl(float DeltaTime)
-{
-    // === 这里是模拟 AirSim 飞行的部分 ===
-    // 实际对接 AirSim 时，这里会替换为 AirSim 的 API 调用
-    // 例如: AirSimClient->moveOnPathAsync(Waypoints, Velocity, ...)
-
-    if (Waypoints.Num() == 0 || CurrentWaypointIndex >= Waypoints.Num())
-    {
-        bIsFlying = false;
-        UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] Mission Complete!"));
+        UE_LOG(LogTemp, Error, TEXT("[SwarmDrone] Connection Failed!"));
+        SocketSubs->DestroySocket(Socket);
         return;
     }
 
-    FVector TargetPos = Waypoints[CurrentWaypointIndex];
-    FVector CurrentPos = GetActorLocation();
+    // --- 2. 构造 JSON 字符串 ---
+    // 我们手动拼接字符串，简单高效，不需要引入 Json 模块
+    FString JsonPayload = TEXT("{\n");
+    
+    // 添加起点信息 (UE 坐标)
+    FVector StartUE = Waypoints[0];
+    JsonPayload += FString::Printf(TEXT("  \"origin_ue\": {\"x\": %.2f, \"y\": %.2f, \"z\": %.2f},\n"), StartUE.X, StartUE.Y, StartUE.Z);
+    
+    // 开始点位数组
+    JsonPayload += TEXT("  \"path\": [\n");
 
-    // 计算方向和距离
-    FVector Direction = (TargetPos - CurrentPos);
-    float Distance = Direction.Size();
+    for (int i = 0; i < Waypoints.Num(); i++)
+    {
+        FVector Pt = Waypoints[i];
+        
+        // 核心转换: UE(cm) -> AirSim(m)
+        // 计算相对于起点的偏移量
+        FVector Rel = Pt - StartUE;
+        float X_m = Rel.X / 100.0f;
+        float Y_m = Rel.Y / 100.0f;
+        float Z_m = -Rel.Z / 100.0f; // Z反转
 
-    if (Distance < AcceptanceRadius)
-    {
-        // 到达当前路点，前往下一个
-        CurrentWaypointIndex++;
-        UE_LOG(LogTemp, Log, TEXT("[SwarmDrone] Reached Waypoint %d"), CurrentWaypointIndex);
+        // 拼接单个点
+        FString PointStr = FString::Printf(TEXT("    {\"x\": %.3f, \"y\": %.3f, \"z\": %.3f}"), X_m, Y_m, Z_m);
+        
+        // 如果不是最后一个点，加逗号
+        if (i < Waypoints.Num() - 1)
+        {
+            PointStr += TEXT(",");
+        }
+        JsonPayload += PointStr + TEXT("\n");
     }
-    else
+
+    JsonPayload += TEXT("  ]\n}"); // 闭合 JSON
+
+    // --- 3. 发送数据 ---
+    TCHAR* SerializedChar = JsonPayload.GetCharArray().GetData();
+    FTCHARToUTF8 Convert(SerializedChar); // 转为 UTF-8
+    
+    int32 Sent = 0;
+    bool bSuccess = Socket->Send((uint8*)Convert.Get(), Convert.Length(), Sent);
+    
+    if (bSuccess)
     {
-        // 简单的插值飞行 (P控制)
-        Direction.Normalize();
-        FVector NewPos = CurrentPos + (Direction * FlightSpeed * DeltaTime);
-        SetActorLocation(NewPos);
+        UE_LOG(LogTemp, Warning, TEXT("[SwarmDrone] JSON Path sent! Size: %d bytes"), Sent);
     }
+
+    // --- 4. 彻底断开 ---
+    // 发送完毕后直接关闭，这样 Python 端的 recv() 会收到空数据从而知道传输结束
+    Socket->Close();
+    SocketSubs->DestroySocket(Socket);
 }
