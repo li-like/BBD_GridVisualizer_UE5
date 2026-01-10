@@ -6,6 +6,10 @@
 #include "Core/GeoSOTUtils.h"
 #include "CesiumGeoreference.h"
 
+// --- JSON ---
+#include "Serialization/JsonSerializer.h"
+#include "JsonObjectConverter.h"
+
 // --- 引擎工具 ---
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
@@ -19,11 +23,10 @@ AFormationMission::AFormationMission()
     PrimaryActorTick.bCanEverTick = true;
 
     // --- [配置] 刚性编队偏移量 ---
-    // 基础飞行高度 (CM) -> 5米
-    float FlyH = 0.0f; 
+    float FlyH = 0.0f; // 基础高度偏移，具体高度由路径计算决定
 
     // 定义 2x2 编队，间距 3米 (300cm)
-    // 假设中心是 (150, 150), 这样 UAV_0(0,0) 和 UAV_3(300,300) 对称分布
+    // 假设中心是 (150, 150)
     DroneOffsets.Add("UAV_0", FVector(0,     0,     FlyH));
     DroneOffsets.Add("UAV_1", FVector(300.0, 0,     FlyH));
     DroneOffsets.Add("UAV_2", FVector(0,     300.0, FlyH));
@@ -34,7 +37,7 @@ void AFormationMission::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    // --- 实时绘制拖尾 (只画最近 5 秒的轨迹，保持清晰) ---
+    // --- 实时绘制拖尾 (只画最近 5 秒的轨迹) ---
     if (!bMissionRunning) return;
 
     for (TActorIterator<APawn> It(GetWorld()); It; ++It)
@@ -65,7 +68,6 @@ void AFormationMission::Tick(float DeltaTime)
                             else if (ID==2) Col=FColor::Blue; 
                             else if (ID==3) Col=FColor::Yellow;
 
-                            // 绘制拖尾：生命周期 5秒，宽度 3.0
                             DrawDebugLine(GetWorld(), LastPos, CurrentPos, Col, false, 5.0f, 0, 3.0f);
                             LastPositions[Key] = CurrentPos;
                         }
@@ -84,135 +86,231 @@ AActor* AFormationMission::FindActorByTag(FName Tag)
     return nullptr;
 }
 
-void AFormationMission::RunFormationMission()
+// 辅助函数：解析 Tag (例如 "Urgency:High")
+bool AFormationMission::ParseActorTags(AActor* Actor, FString& OutUrgency, int32& OutDeadline)
 {
-    UE_LOG(LogTemp, Warning, TEXT("========== FORMATION MISSION START (FIXED COORDINATES) =========="));
+    if(!Actor) return false;
+    
+    // 默认值
+    OutUrgency = "Low";
+    OutDeadline = 9999;
+    
+    for(FName Tag : Actor->Tags)
+    {
+        FString S = Tag.ToString();
+        
+        if(S.StartsWith("Urgency:")) {
+            OutUrgency = S.RightChop(8); 
+        }
+        else if(S.StartsWith("Deadline:")) {
+            FString Val = S.RightChop(9);
+            OutDeadline = FCString::Atoi(*Val);
+        }
+    }
+    return true;
+}
 
-    // 1. 获取管理器引用
+// ============================================================================
+// AI 核心流程
+// ============================================================================
+
+void AFormationMission::RequestAIDecision()
+{
+    UE_LOG(LogTemp, Warning, TEXT("========== REQUESTING AI DECISION =========="));
+    
+    // 1. 获取引用
     if (!ISMManager) ISMManager = Cast<AGeoSOTISMManager>(UGameplayStatics::GetActorOfClass(GetWorld(), AGeoSOTISMManager::StaticClass()));
     if (!GeoRef) GeoRef = Cast<ACesiumGeoreference>(UGameplayStatics::GetActorOfClass(GetWorld(), ACesiumGeoreference::StaticClass()));
-    
-    if (!ISMManager || !GeoRef) 
+
+    ScanAndReportScene();
+}
+
+void AFormationMission::ScanAndReportScene()
+{
+    // 1. 扫描场景
+    TArray<AActor*> TargetActors;
+    UGameplayStatics::GetAllActorsWithTag(GetWorld(), FName("MissionTarget"), TargetActors);
+
+    if (TargetActors.Num() == 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("Missing ISMManager or GeoRef!"));
+        UE_LOG(LogTemp, Error, TEXT("[UE] No actors found with tag 'MissionTarget'!"));
         return;
     }
 
-    // 2. 确定编队的【几何中心】起点和终点
-    AActor* StartActor = FindActorByTag(FName("Airport_Start"));
-    AActor* TargetActor = FindActorByTag(FName("Airport_End_0")); // 所有飞机的大方向
-    
-    if (!StartActor || !TargetActor) 
+    // 2. 构造 JSON
+    FString TargetsJson = "";
+    for(int i=0; i<TargetActors.Num(); ++i)
     {
-        UE_LOG(LogTemp, Error, TEXT("Missing Airport_Start or Airport_End_0 tags!"));
-        return;
+        AActor* Act = TargetActors[i];
+        FString Name = Act->GetName();
+        FVector Loc = Act->GetActorLocation(); // cm
+        
+        FString Urgency;
+        int32 Deadline;
+        ParseActorTags(Act, Urgency, Deadline);
+
+        TargetsJson += FString::Printf(
+            TEXT("{\"id\":\"%s\", \"x\":%.1f, \"y\":%.1f, \"z\":%.1f, \"urgency\":\"%s\", \"deadline\":%d}"),
+            *Name, Loc.X, Loc.Y, Loc.Z, *Urgency, Deadline
+        );
+
+        if(i < TargetActors.Num() - 1) TargetsJson += ",";
     }
 
-    // 获取世界原点 (PlayerStart位置)
-    FVector OriginLoc = StartActor->GetActorLocation();
+    // 获取无人机当前位置 (假设以 Airport_Start 为准)
+    AActor* StartNode = FindActorByTag("Airport_Start");
+    FVector CurPos = StartNode ? StartNode->GetActorLocation() : FVector::ZeroVector;
 
-    // 设定中心路径的起终点 (稍微抬高 Z 轴)
-    // 假设编队中心相对于原点偏移 (150, 150)，位于 UAV_0 和 UAV_3 中间
-    float PathHeight = 0.0f;
-    FVector CenterStart = OriginLoc + FVector(150, 150, PathHeight); 
-    FVector CenterEnd   = TargetActor->GetActorLocation() + FVector(150, 150, PathHeight);
+    FString FinalPayload = FString::Printf(
+        TEXT("{\"uav_current_pos\":{\"x\":%.1f, \"y\":%.1f, \"z\":%.1f}, \"targets\":[%s]}"),
+        CurPos.X, CurPos.Y, CurPos.Z, *TargetsJson
+    );
 
-    // 3. 计算【领航路径】(只算一次)
-    TArray<FVector> CenterPathPoints;
-    TArray<int64> CenterPathCodes;
-    
-    // 传入空 Set，因为这是唯一的路径，不需要避让别人
-    TSet<int64> EmptySet; 
-    bool bPathFound = CalculatePathForCenter(CenterStart, CenterEnd, CenterPathPoints, CenterPathCodes, EmptySet);
+    // 3. 连接 AI Brain (Port 9999)
+    ISocketSubsystem* SocketSubs = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    FSocket* Socket = SocketSubs->CreateSocket(NAME_Stream, TEXT("AIBrainLink"), false);
+    TSharedRef<FInternetAddr> Addr = SocketSubs->CreateInternetAddr();
+    bool bValid;
+    Addr->SetIp(TEXT("127.0.0.1"), bValid);
+    Addr->SetPort(9999); 
 
-    if (!bPathFound)
+    if (Socket && Socket->Connect(*Addr))
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to generate Center Path!"));
-        return;
+        // 发送
+        TCHAR* SerializedChar = FinalPayload.GetCharArray().GetData();
+        FTCHARToUTF8 Convert(SerializedChar);
+        int32 Sent = 0;
+        Socket->Send((uint8*)Convert.Get(), Convert.Length(), Sent);
+        
+        UE_LOG(LogTemp, Warning, TEXT("[UE] Scene sent to AI. Waiting for plan..."));
+
+        // 接收 (阻塞等待)
+        uint8 Buffer[20480]; 
+        int32 BytesRead = 0;
+        
+        if (Socket->Recv(Buffer, sizeof(Buffer), BytesRead))
+        {
+            FString Response = FString(UTF8_TO_TCHAR((const char*)Buffer));
+            Response = Response.Left(BytesRead);
+            
+            UE_LOG(LogTemp, Log, TEXT("[UE] AI Response Raw: %s"), *Response);
+
+            // 解析 JSON
+            TSharedPtr<FJsonObject> JsonObj;
+            TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Response);
+
+            if (FJsonSerializer::Deserialize(Reader, JsonObj))
+            {
+                FString Cmd = JsonObj->GetStringField("cmd");
+                if (Cmd == "segmented_plan")
+                {
+                    FString Reason = JsonObj->GetStringField("ai_reason");
+                    UE_LOG(LogTemp, Warning, TEXT("[UE] AI Reason: %s"), *Reason);
+
+                    // 解析 segments 数组
+                    TArray<TSharedPtr<FJsonValue>> SegArray = JsonObj->GetArrayField("segments");
+                    TArray<FMissionSegment> MissionPlan;
+                    
+                    for (auto Val : SegArray)
+                    {
+                        TSharedPtr<FJsonObject> SegObj = Val->AsObject();
+                        FMissionSegment Seg;
+                        Seg.TargetID = SegObj->GetStringField("target_id");
+                        Seg.Speed = SegObj->GetNumberField("speed");
+                        MissionPlan.Add(Seg);
+                    }
+
+                    // 执行多段任务
+                    RunMultiSegmentMission(MissionPlan);
+                }
+            }
+        }
+        Socket->Close();
     }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("[UE] Failed to connect to AI Brain (Port 9999)."));
+    }
+    
+    if(Socket) SocketSubs->DestroySocket(Socket);
+}
 
-    // 可视化 ISM Path (绘制红/绿网格)
-    ISMManager->DrawPath(CenterPathCodes); 
-    UE_LOG(LogTemp, Log, TEXT("ISM Path Visualized: %d grids"), CenterPathCodes.Num());
+void AFormationMission::RunMultiSegmentMission(const TArray<FMissionSegment>& Segments)
+{
+    if (!ISMManager || !GeoRef) return;
 
-    // 4. 为每架无人机生成偏移路径并打包 JSON
-    FString JsonDrones = "";
-    int32 SuccessCount = 0;
+    // 存储分段结果
+    TArray<TArray<FVector>> AllSegmentsPoints;
+    TArray<float> AllSpeeds;
+    
+    // 这里的 OccupiedSet 如果想避免“回头路”撞自己，可以一直保留
+    // 这里为了简化，假设每段独立避障
+    TSet<int64> GlobalOccupied; 
+    
+    // 渲染用的 Code
+    TArray<int64> TotalVisCodes;
+
+    // 1. 初始位置 (Airport_Start)
+    AActor* StartActor = FindActorByTag("Airport_Start");
+    if(!StartActor) return;
+    FVector CurrentPos = StartActor->GetActorLocation();
     
     LastPositions.Empty();
     bMissionRunning = true;
 
-    for (auto& Elem : DroneOffsets)
+    // 2. 循环每一段
+    for (const FMissionSegment& Seg : Segments)
     {
-        FString DroneName = Elem.Key;     // e.g. "UAV_0"
-        FVector Offset    = Elem.Value;   // e.g. (300, 0, 500)
-
-        // 计算该无人机相对于【中心路径】的偏移量
-        // CenterStart 是 (Origin + 150, 150, 500)
-        // MyStart 是 (Origin + Offset)
-        // RelativeToCenter = MyStart - CenterStart = Offset - (150, 150, 500)
-        FVector RelativeToCenter = Offset - FVector(150, 150, PathHeight); 
-
-        // 记录初始位置 (用于 UE 拖尾可视化的起点)
-        FVector RealStartPos = OriginLoc + Offset;
-        LastPositions.Add(DroneName, RealStartPos);
-
-        FString PathJson = "[";
-
-        // --- [核心修复 1] 动态计算安全起飞点 ---
-        // 之前写死的 {0,0,-5} 会导致所有飞机飞向中心相撞。
-        // 现在我们让每架飞机在其 Offset 位置垂直起飞。
-        // AirSim 坐标 = Offset (cm) / 100 -> 米
-        float StartX_m = Offset.X / 100.0f;
-        float StartY_m = Offset.Y / 100.0f;
+        AActor* TargetActor = nullptr;
         
-        float TakeoffZ_m = -2.0f; // 默认保底 2米
-        if (CenterPathPoints.Num() > 0)
-        {
-            // 计算该无人机第一个目标点的实际高度
-            FVector FirstTarget = CenterPathPoints[0] + RelativeToCenter;
-            FVector FirstRel = FirstTarget - OriginLoc;
-            TakeoffZ_m = -FirstRel.Z / 100.0f; // UE(正) -> AirSim(负)
+        // 查找 Actor
+        if(Seg.TargetID == "Airport_Start") {
+            TargetActor = FindActorByTag("Airport_Start");
+        } else {
+            TArray<AActor*> Candidates;
+            UGameplayStatics::GetAllActorsWithTag(GetWorld(), FName("MissionTarget"), Candidates);
+            for(AActor* A : Candidates) {
+                if(A->GetName() == Seg.TargetID) { TargetActor = A; break; }
+            }
         }
-        // Z = -5.0 (向上飞5米)
-        PathJson += FString::Printf(TEXT("{\"x\":%.3f, \"y\":%.3f, \"z\":%.3f},"), StartX_m, StartY_m, TakeoffZ_m);
 
-        // 生成跟随路径
-        for(int i = 0; i < CenterPathPoints.Num(); i++)
-        {
-            // 刚性跟随：目标点 = 中心路径点 + 相对中心的偏移
-            FVector TargetPos = CenterPathPoints[i] + RelativeToCenter;
-            
-            // --- [核心修复 2] 坐标相对性修正 ---
-            // 之前的错误： Rel = TargetPos - RealStartPos (相对于自己)
-            // 修正后：     Rel = TargetPos - OriginLoc  (相对于世界原点)
-            // 这样 UAV_1 (at 300) 收到 (300) 的指令，就会保持在 x=300
-            FVector Rel = TargetPos - OriginLoc;
-            
-            float X_m = Rel.X / 100.0f;
-            float Y_m = Rel.Y / 100.0f;
-            float Z_m = -Rel.Z / 100.0f; // UE Z-Up -> AirSim Z-Down
-            
-            PathJson += FString::Printf(TEXT("{\"x\":%.3f, \"y\":%.3f, \"z\":%.3f}"), X_m, Y_m, Z_m);
-            if (i < CenterPathPoints.Num() - 1) PathJson += ",";
+        if(!TargetActor) {
+            UE_LOG(LogTemp, Error, TEXT("[UE] Target %s Not Found, Skipping"), *Seg.TargetID);
+            continue;
         }
-        PathJson += "]";
 
-        FString DroneEntry = FString::Printf(TEXT("\"%s\": { \"path\": %s }"), *DroneName, *PathJson);
-        if (SuccessCount > 0) JsonDrones += ",";
-        JsonDrones += DroneEntry;
-        SuccessCount++;
+        FVector GoalPos = TargetActor->GetActorLocation();
+        UE_LOG(LogTemp, Log, TEXT("[UE] Calculating Segment -> %s (Speed: %.1f)"), *Seg.TargetID, Seg.Speed);
+
+        TArray<FVector> SegmentPoints;
+        TArray<int64> SegmentCodes;
+
+        // 调用寻路
+        if(CalculatePathForCenter(CurrentPos, GoalPos, SegmentPoints, SegmentCodes, GlobalOccupied))
+        {
+            AllSegmentsPoints.Add(SegmentPoints);
+            AllSpeeds.Add(Seg.Speed);
+            
+            TotalVisCodes.Append(SegmentCodes);
+            
+            // 更新下一段起点
+            if(SegmentPoints.Num() > 0) {
+                CurrentPos = SegmentPoints.Last();
+            }
+        }
     }
 
-    // 5. 发送最终 JSON
-    if (SuccessCount > 0)
-    {
-        FString FinalJson = FString::Printf(TEXT("{ \"mission_type\": \"formation\", \"drones\": { %s } }"), *JsonDrones);
-        SendMissionToPython(FinalJson);
-    }
+    // 3. 可视化
+    if (ISMManager) ISMManager->DrawPath(TotalVisCodes);
+
+    // 4. 发送给 Python AirSim (Port 8888)
+    GenerateAndSendSegmentedJson(AllSegmentsPoints, AllSpeeds);
 }
 
-// 专门为中心点算路的辅助函数
+// ============================================================================
+// 寻路与坐标核心 (已修复高度问题)
+// ============================================================================
+
 bool AFormationMission::CalculatePathForCenter(
     FVector StartPos, 
     FVector EndPos, 
@@ -223,41 +321,37 @@ bool AFormationMission::CalculatePathForCenter(
     if (!GeoRef) return false;
 
     int32 Level = 21; 
-    double HSpan = UGeoSOTUtils::GetHeightSpan(Level); // 单位：米
+    double HSpan = UGeoSOTUtils::GetHeightSpan(Level);
 
-    // 1. 获取起点的绝对信息
+    // 1. 获取起点的绝对海拔基准
     FVector3d StartLLH = GeoRef->TransformUnrealPositionToLongitudeLatitudeHeight(FVector3d(StartPos));
-    
-    // 【核心修复 A】记录起点的基准海拔高度
-    // 我们后续计算的所有高度，都应该基于这个基准，或者与其进行差值计算
     double BaseAltitude = StartLLH.Z;
 
+    // 计算起点网格
     int32 R1, C1;
     UGeoSOTUtils::LatLonToGeoSOT(StartLLH.Y, StartLLH.X, Level, R1, C1);
     
-    // 计算起点在第几层网格 (用于 A* 逻辑)
+    // 计算起点高度层 (用于 A* 逻辑)
     int32 Alt1 = (int32)(StartLLH.Z / HSpan);
     if(Alt1 < 0) Alt1 = 0;
     int64 StartCode = UGeoSOTUtils::GenerateGeoSOTCode(R1, C1, Level, Alt1);
 
-    // 2. 计算终点
+    // 2. 计算终点 (强制与起点同层，避免爬楼梯)
     FVector3d EndLLH = GeoRef->TransformUnrealPositionToLongitudeLatitudeHeight(FVector3d(EndPos));
     int32 R2, C2;
     UGeoSOTUtils::LatLonToGeoSOT(EndLLH.Y, EndLLH.X, Level, R2, C2);
-    int32 Alt2 = (int32)(EndLLH.Z / HSpan);
-    if(Alt2 < 0) Alt2 = 0;
+    
+    // 强制同层
+    int32 Alt2 = Alt1;
     int64 EndCode = UGeoSOTUtils::GenerateGeoSOTCode(R2, C2, Level, Alt2);
 
     // 3. A* 寻路
     bool bFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, OutPathCodes, OccupiedSet);
     if (!bFound) return false;
 
-    // 4. 还原坐标 (核心修复部分)
+    // 4. 还原坐标
     OutPathPoints.Empty();
     
-    // 【核心修复 B】移除 MinH = 300.0 的错误定义
-    // double MinH = 300.0; <--- 删掉这行，它是导致飞到300米高空的罪魁祸首
-
     for (int64 Code : OutPathCodes)
     {
         int32 r, c, l, h;
@@ -265,12 +359,9 @@ bool AFormationMission::CalculatePathForCenter(
         double lat, lon;
         UGeoSOTUtils::GetGeoSOTCenter(r, c, l, lat, lon);
         
-        // 【核心修复 C】正确的高度还原逻辑
-        // 我们不能简单用 h * HSpan，因为那可能在地下。
-        // 逻辑：计算当前网格层级(h)相对于起点网格层级(Alt1)的高度差，加到基准海拔上。
-        
-        double HeightDiff = (h - Alt1) * HSpan; // 相对高度变化量 (米)
-        double FinalHeight = BaseAltitude + HeightDiff; 
+        // 核心修复：基于基准海拔计算高度
+        double HeightDiff = (h - Alt1) * HSpan; 
+        double FinalHeight = BaseAltitude + HeightDiff;
 
         FVector3d LLH(lon, lat, FinalHeight);
         FVector Pos = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(LLH);
@@ -279,25 +370,116 @@ bool AFormationMission::CalculatePathForCenter(
     return true;
 }
 
-void AFormationMission::SendMissionToPython(FString JsonPayload)
+// ============================================================================
+// 通信与 JSON 生成
+// ============================================================================
+
+void AFormationMission::GenerateAndSendSegmentedJson(const TArray<TArray<FVector>>& AllSegmentsPoints, const TArray<float>& AllSpeeds)
+{
+    AActor* StartActor = FindActorByTag("Airport_Start");
+    if(!StartActor) return;
+    FVector OriginLoc = StartActor->GetActorLocation();
+
+    FString JsonDrones = "";
+    int32 SuccessCount = 0;
+
+    // 遍历每一架无人机
+    for (auto& Elem : DroneOffsets)
+    {
+        FString DroneName = Elem.Key;
+        FVector Offset = Elem.Value;
+
+        // 计算编队偏移 (假设中心是 150, 150)
+        FVector RelativeToCenter = Offset - FVector(150, 150, 0); 
+
+        FString SegmentsJson = "["; 
+
+        // 遍历每一段
+        for(int k=0; k < AllSegmentsPoints.Num(); ++k)
+        {
+            const TArray<FVector>& CurrentSegPoints = AllSegmentsPoints[k];
+            float CurrentSpeed = AllSpeeds[k];
+
+            FString PathJson = "[";
+            
+            // 如果是第一段，添加初始起飞点
+            if(k==0) {
+                float SX = Offset.X / 100.0f;
+                float SY = Offset.Y / 100.0f;
+                // Z = -3.0 (AirSim)
+                PathJson += FString::Printf(TEXT("{\"x\":%.3f, \"y\":%.3f, \"z\":-3.0},"), SX, SY);
+                
+                // 记录拖尾起点
+                LastPositions.Add(DroneName, OriginLoc + Offset);
+            }
+
+            for(int i=0; i<CurrentSegPoints.Num(); ++i)
+            {
+                // 目标 = 路径中心 + 编队偏移
+                FVector TargetPos = CurrentSegPoints[i] + RelativeToCenter;
+                
+                // 计算相对坐标
+                FVector Rel = TargetPos - OriginLoc;
+                float X = Rel.X / 100.0f;
+                float Y = Rel.Y / 100.0f;
+                // Z轴反转 (UE Up -> AirSim Down)
+                float Z = -Rel.Z / 100.0f; 
+                
+                PathJson += FString::Printf(TEXT("{\"x\":%.3f, \"y\":%.3f, \"z\":%.3f}"), X, Y, Z);
+                if(i < CurrentSegPoints.Num()-1) PathJson += ",";
+            }
+            PathJson += "]";
+
+            SegmentsJson += FString::Printf(TEXT("{\"speed\": %.1f, \"path\": %s}"), CurrentSpeed, *PathJson);
+            
+            if(k < AllSegmentsPoints.Num()-1) SegmentsJson += ",";
+        }
+        SegmentsJson += "]";
+
+        FString DroneEntry = FString::Printf(TEXT("\"%s\": { \"segments\": %s }"), *DroneName, *SegmentsJson);
+        if (SuccessCount > 0) JsonDrones += ",";
+        JsonDrones += DroneEntry;
+        SuccessCount++;
+    }
+
+    if (SuccessCount > 0)
+    {
+        // 顶层 speed 字段移除，因为 speed 已经在 segments 里了
+        FString FinalJson = FString::Printf(TEXT("{ \"mission_type\": \"segmented\", \"drones\": { %s } }"), *JsonDrones);
+        SendToSocket(FinalJson, 8888);
+    }
+}
+
+void AFormationMission::SendToSocket(FString Payload, int32 Port)
 {
     ISocketSubsystem* SocketSubs = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
-    FSocket* Socket = SocketSubs->CreateSocket(NAME_Stream, TEXT("SwarmConnector"), false);
-    if (!Socket) return;
-
+    FSocket* Socket = SocketSubs->CreateSocket(NAME_Stream, TEXT("SocketLink"), false);
     TSharedRef<FInternetAddr> Addr = SocketSubs->CreateInternetAddr();
     bool bValid;
     Addr->SetIp(TEXT("127.0.0.1"), bValid);
-    Addr->SetPort(8888);
+    Addr->SetPort(Port);
     
     if (Socket->Connect(*Addr))
     {
-        TCHAR* SerializedChar = JsonPayload.GetCharArray().GetData();
+        TCHAR* SerializedChar = Payload.GetCharArray().GetData();
         FTCHARToUTF8 Convert(SerializedChar);
         int32 Sent = 0;
         Socket->Send((uint8*)Convert.Get(), Convert.Length(), Sent);
         Socket->Close();
-        UE_LOG(LogTemp, Warning, TEXT("[Mission] Sent %d bytes to Python."), Sent);
+        UE_LOG(LogTemp, Warning, TEXT("[UE] Data sent to 127.0.0.1:%d"), Port);
     }
     SocketSubs->DestroySocket(Socket);
 }
+
+// 兼容旧接口 (保留，但建议使用 RequestAIDecision)
+void AFormationMission::RunFormationMission()
+{
+    // 如果需要手动测试单段，可以在这里写死
+    // 此处留空或保留旧逻辑
+    UE_LOG(LogTemp, Warning, TEXT("Please use RequestAIDecision button for AI Logic."));
+}
+
+// void AFormationMission::SendMissionToPython(FString JsonPayload)
+// {
+//     SendToSocket(JsonPayload, 8888);
+// }
