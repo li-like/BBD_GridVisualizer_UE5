@@ -20,7 +20,7 @@ AFormationMission::AFormationMission()
 
     // --- [配置] 刚性编队偏移量 ---
     // 基础飞行高度 (CM) -> 5米
-    float FlyH = 100.0f; 
+    float FlyH = 0.0f; 
 
     // 定义 2x2 编队，间距 3米 (300cm)
     // 假设中心是 (150, 150), 这样 UAV_0(0,0) 和 UAV_3(300,300) 对称分布
@@ -113,7 +113,7 @@ void AFormationMission::RunFormationMission()
 
     // 设定中心路径的起终点 (稍微抬高 Z 轴)
     // 假设编队中心相对于原点偏移 (150, 150)，位于 UAV_0 和 UAV_3 中间
-    float PathHeight = 20.0f;
+    float PathHeight = 0.0f;
     FVector CenterStart = OriginLoc + FVector(150, 150, PathHeight); 
     FVector CenterEnd   = TargetActor->GetActorLocation() + FVector(150, 150, PathHeight);
 
@@ -223,33 +223,40 @@ bool AFormationMission::CalculatePathForCenter(
     if (!GeoRef) return false;
 
     int32 Level = 21; 
-    double HSpan = UGeoSOTUtils::GetHeightSpan(Level);
+    double HSpan = UGeoSOTUtils::GetHeightSpan(Level); // 单位：米
 
-    // 1. 转 GeoSOT 编码
+    // 1. 获取起点的绝对信息
     FVector3d StartLLH = GeoRef->TransformUnrealPositionToLongitudeLatitudeHeight(FVector3d(StartPos));
+    
+    // 【核心修复 A】记录起点的基准海拔高度
+    // 我们后续计算的所有高度，都应该基于这个基准，或者与其进行差值计算
+    double BaseAltitude = StartLLH.Z;
+
     int32 R1, C1;
     UGeoSOTUtils::LatLonToGeoSOT(StartLLH.Y, StartLLH.X, Level, R1, C1);
     
-    // 基于真实高度计算索引
+    // 计算起点在第几层网格 (用于 A* 逻辑)
     int32 Alt1 = (int32)(StartLLH.Z / HSpan);
-    if(Alt1<0) Alt1=0;
+    if(Alt1 < 0) Alt1 = 0;
     int64 StartCode = UGeoSOTUtils::GenerateGeoSOTCode(R1, C1, Level, Alt1);
 
+    // 2. 计算终点
     FVector3d EndLLH = GeoRef->TransformUnrealPositionToLongitudeLatitudeHeight(FVector3d(EndPos));
     int32 R2, C2;
     UGeoSOTUtils::LatLonToGeoSOT(EndLLH.Y, EndLLH.X, Level, R2, C2);
-    
     int32 Alt2 = (int32)(EndLLH.Z / HSpan);
-    if(Alt2<0) Alt2=0;
+    if(Alt2 < 0) Alt2 = 0;
     int64 EndCode = UGeoSOTUtils::GenerateGeoSOTCode(R2, C2, Level, Alt2);
 
-    // 2. A* 寻路
+    // 3. A* 寻路
     bool bFound = UGeoSOTPathFinder::FindPath(this, StartCode, EndCode, OutPathCodes, OccupiedSet);
     if (!bFound) return false;
 
-    // 3. 还原为坐标点
+    // 4. 还原坐标 (核心修复部分)
     OutPathPoints.Empty();
-    double MinH = 300.0; // 最小高度钳制 (3米)
+    
+    // 【核心修复 B】移除 MinH = 300.0 的错误定义
+    // double MinH = 300.0; <--- 删掉这行，它是导致飞到300米高空的罪魁祸首
 
     for (int64 Code : OutPathCodes)
     {
@@ -258,10 +265,14 @@ bool AFormationMission::CalculatePathForCenter(
         double lat, lon;
         UGeoSOTUtils::GetGeoSOTCenter(r, c, l, lat, lon);
         
-        double height = h * HSpan;
-        if(height < MinH) height = MinH;
+        // 【核心修复 C】正确的高度还原逻辑
+        // 我们不能简单用 h * HSpan，因为那可能在地下。
+        // 逻辑：计算当前网格层级(h)相对于起点网格层级(Alt1)的高度差，加到基准海拔上。
+        
+        double HeightDiff = (h - Alt1) * HSpan; // 相对高度变化量 (米)
+        double FinalHeight = BaseAltitude + HeightDiff; 
 
-        FVector3d LLH(lon, lat, height);
+        FVector3d LLH(lon, lat, FinalHeight);
         FVector Pos = GeoRef->TransformLongitudeLatitudeHeightPositionToUnreal(LLH);
         OutPathPoints.Add(Pos);
     }

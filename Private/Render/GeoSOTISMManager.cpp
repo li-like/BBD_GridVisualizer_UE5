@@ -60,6 +60,9 @@ void AGeoSOTISMManager::DrawPath(const TArray<int64>& PathCodes)
 
     // 假设 BaseMesh 是 100x100x100 的立方体
     FVector InstanceScale(GridSizeUE / 100.0);
+    
+    UE_LOG(LogTemp, Warning, TEXT("========== ISM DRAW PATH DEBUG =========="));
+    UE_LOG(LogTemp, Warning, TEXT("Level: %d | HSpan: %.2f meters"), Level, GridSizeMeters);
 
     for (int64 Code : PathCodes)
     {
@@ -71,10 +74,14 @@ void AGeoSOTISMManager::DrawPath(const TArray<int64>& PathCodes)
         InstanceTransform.SetLocation(Location);
         InstanceTransform.SetRotation(FQuat::Identity);
         InstanceTransform.SetScale3D(InstanceScale);
+        
+        UE_LOG(LogTemp, Warning, TEXT("Code=%lld AltIndex=%d | RenderZ_UE=%.2f | RenderZ_Meters=%.2f"), 
+             Code ,Alt, Location.Z, Location.Z / 100.0f);
 
         // 3. 添加实例
         PathISM->AddInstance(InstanceTransform, true);
     }
+    UE_LOG(LogTemp, Warning, TEXT("========================================="));
 }
 
 void AGeoSOTISMManager::BeginPlay()
