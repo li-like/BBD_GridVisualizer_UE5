@@ -61,7 +61,91 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (!bIsPoolInitialized || GridTextData.Num() == 0) return;
+	Super::Tick(DeltaTime);
+
+    if (!bIsPoolInitialized || GridTextData.Num() == 0) return;
+
+    // =========================================================
+    // 1. 动态仿真：时间切片建筑物检测 (解决 Cesium 加载延迟问题)
+    // =========================================================
+    if (GetWorld() && GridProcMesh)
+    {
+        bool bNeedsMeshUpdate = false;
+        double SpanMeters = UGeoSOTMath::GetGridSpanMeters(TargetLevel);
+        
+        // 构建 OBB 的半尺寸 (Half Extent)。乘以 48 而不是 50，是为了留出 2% 的安全间隙，防止网格互相误碰
+        FVector BoxHalfExtent(SpanMeters * 48.0); 
+        FCollisionShape OBBShape = FCollisionShape::MakeBox(BoxHalfExtent);
+        
+        FCollisionQueryParams QueryParams;
+        QueryParams.AddIgnoredActor(this); // 忽略自身
+        QueryParams.bTraceComplex = true;  // Cesium 建议开启复杂碰撞检测
+
+        // 确定这一帧要检测的批次范围
+        int32 EndIndex = FMath::Min(CurrentDetectionIndex + DetectionPerFrame, GridTextData.Num());
+
+        for (int32 i = CurrentDetectionIndex; i < EndIndex; ++i)
+        {
+            FGridTextInfo& Grid = GridTextData[i];
+
+            // 如果已经是障碍物了，如果是纯静态环境，可以跳过不测。
+            // 但为了体现“呼吸效应”（Cesium模型如果被隐藏，网格也能恢复），我们这里持续检测
+            
+            // a. 算出当前网格中心的绝对世界坐标
+            FVector3d Center3D = CesiumGeoref->TransformLongitudeLatitudeHeightPositionToUnreal(
+                FVector3d(Grid.CenterLon, Grid.CenterLat, Grid.CenterAlt)
+            );
+            FVector WorldCenter = (FVector)Center3D;
+
+            // b. 算出符合地球曲率的局部姿态 (FQuat)
+            FVector3d UpLLH = CesiumGeoref->TransformLongitudeLatitudeHeightPositionToUnreal(
+                FVector3d(Grid.CenterLon, Grid.CenterLat, Grid.CenterAlt + 100.0));
+            FVector UpDir = (FVector)(UpLLH - Center3D).GetSafeNormal();
+
+            FVector3d NorthLLH = CesiumGeoref->TransformLongitudeLatitudeHeightPositionToUnreal(
+                FVector3d(Grid.CenterLon, Grid.CenterLat + 0.01, Grid.CenterAlt));
+            FVector TempNorthDir = (FVector)(NorthLLH - Center3D).GetSafeNormal();
+
+            FVector EastDir = FVector::CrossProduct(TempNorthDir, UpDir).GetSafeNormal();
+            FVector NorthDir = FVector::CrossProduct(UpDir, EastDir).GetSafeNormal();
+            FQuat WorldQuat = FRotationMatrix::MakeFromXZ(EastDir, UpDir).ToQuat();
+
+            // c. 发射 OBB 探测
+            bool bHit = GetWorld()->OverlapAnyTestByChannel(WorldCenter, WorldQuat, DetectionChannel, OBBShape, QueryParams);
+
+            // d. 状态机流转与颜色修改
+            if (bHit != Grid.bIsObstacle)
+            {
+                Grid.bIsObstacle = bHit;
+                
+                // 根据状态设置颜色：黄色为待裂变集合，绿色为安全
+            	FColor TargetColor = bHit ? FColor(255, 255, 0, 180) : FColor(0, 255, 0, 15);
+
+                // 更新该网格的 24 个顶点颜色
+                for (int v = 0; v < 24; ++v)
+                {
+                    CachedColors[Grid.VertexStartIndex + v] = TargetColor;
+                }
+                bNeedsMeshUpdate = true;
+            }
+        }
+
+        // 推进队列指针，循环扫描
+        CurrentDetectionIndex = EndIndex;
+        if (CurrentDetectionIndex >= GridTextData.Num())
+        {
+            CurrentDetectionIndex = 0;
+        }
+
+        // e. 极其轻量级的渲染更新
+        if (bNeedsMeshUpdate)
+        {
+            TArray<FVector> EmptyNormals;
+            TArray<FProcMeshTangent> EmptyTangents;
+            // 这个函数只更新传入的数据，速度极快！
+            GridProcMesh->UpdateMeshSection(0, CachedVertices, EmptyNormals, CachedUVs, CachedColors, EmptyTangents);
+        }
+    }
 
 	FVector ViewLocation;
 	bool bHasValidView = false;
@@ -142,11 +226,16 @@ void AGeoSOTGridRenderer::GenerateAndRenderGrids()
     SetActorLocation((FVector)OriginWorld);
     
     // 我们将所有的顶点和面片数据收集到这两个大数组中，一次性渲染
+	
+	CachedVertices.Empty();
+	CachedUVs.Empty();
+	CachedColors.Empty();
     TArray<FVector> AllVertices;
 	TArray<FVector2D> AllUVs;
     TArray<int32> AllTriangles;
     
     int32 VertexIndexOffset = 0;
+	FColor InitialSafeColor = FColor(0, 255, 0, 15);
 
     for (int32 h = AltLayerMin; h <= AltLayerMax; ++h)
     {
@@ -194,23 +283,28 @@ void AGeoSOTGridRenderer::GenerateAndRenderGrids()
 				  {0, 2, 4, 6}, // Left
 				  {1, 3, 5, 7}  // Right
           	};
+          	int32 CurrentGridVertexStart = CachedVertices.Num();
 
-          	// 逐面生成顶点、UV 和三角形
+          	// 记录当前网格在数组中的起始索引
+
           	for (int face = 0; face < 6; ++face)
           	{
-          		// 添加该面的 4 个顶点
-          		AllVertices.Add(P[FaceIdx[face][0]]); 
-          		AllVertices.Add(P[FaceIdx[face][1]]); 
-          		AllVertices.Add(P[FaceIdx[face][2]]); 
-          		AllVertices.Add(P[FaceIdx[face][3]]); 
+          		CachedVertices.Add(P[FaceIdx[face][0]]); 
+          		CachedVertices.Add(P[FaceIdx[face][1]]); 
+          		CachedVertices.Add(P[FaceIdx[face][2]]); 
+          		CachedVertices.Add(P[FaceIdx[face][3]]); 
 
-          		// 补全缺失的 UV (左下, 右下, 左上, 右上)
-          		AllUVs.Add(FVector2D(0, 0));
-          		AllUVs.Add(FVector2D(1, 0));
-          		AllUVs.Add(FVector2D(0, 1));
-          		AllUVs.Add(FVector2D(1, 1));
+          		CachedUVs.Add(FVector2D(0, 0));
+          		CachedUVs.Add(FVector2D(1, 0));
+          		CachedUVs.Add(FVector2D(0, 1));
+          		CachedUVs.Add(FVector2D(1, 1));
 
-          		// 构建该面的 2 个三角形 (注意偏移量)
+          		// 统一涂上初始绿色
+          		CachedColors.Add(InitialSafeColor);
+          		CachedColors.Add(InitialSafeColor);
+          		CachedColors.Add(InitialSafeColor);
+          		CachedColors.Add(InitialSafeColor);
+
           		AllTriangles.Add(VertexIndexOffset + 0);
           		AllTriangles.Add(VertexIndexOffset + 2);
           		AllTriangles.Add(VertexIndexOffset + 1);
@@ -222,29 +316,31 @@ void AGeoSOTGridRenderer::GenerateAndRenderGrids()
           		VertexIndexOffset += 4;
           	}
 
-             // 5. 生成逻辑层数据 (文字中心点永远在最中间)
-             double RealCenterLat = GridIndexToCenterAngle(i, TargetLevel);
-             double RealCenterLon = GridIndexToCenterAngle(j, TargetLevel);
-             double RealCenterAlt = MinAltVal + (SpanMeters * 0.5);
+          	double RealCenterLat = GridIndexToCenterAngle(i, TargetLevel);
+          	double RealCenterLon = GridIndexToCenterAngle(j, TargetLevel);
+          	double RealCenterAlt = MinAltVal + (SpanMeters * 0.5);
 
-             FGridTextInfo TextInfo;
-             TextInfo.CenterLat = RealCenterLat;
-             TextInfo.CenterLon = RealCenterLon;
-             TextInfo.CenterAlt = RealCenterAlt;
-             TextInfo.PrecomputedCodeStr = UGeoSOTMath::EncodeToGeoSOTString(RealCenterLat, RealCenterLon, RealCenterAlt, TargetLevel, true);
+          	FGridTextInfo TextInfo;
+          	TextInfo.CenterLat = RealCenterLat;
+          	TextInfo.CenterLon = RealCenterLon;
+          	TextInfo.CenterAlt = RealCenterAlt;
+          	TextInfo.PrecomputedCodeStr = UGeoSOTMath::EncodeToGeoSOTString(RealCenterLat, RealCenterLon, RealCenterAlt, TargetLevel, true);
              
-             GridTextData.Add(TextInfo);
+          	TextInfo.VertexStartIndex = CurrentGridVertexStart;
+          	TextInfo.bIsObstacle = false; 
+             
+          	GridTextData.Add(TextInfo);
           }
        }
     }
 
-    // 将计算好的所有点和面，一次性交给虚幻引擎生成网格
-    TArray<FVector> EmptyNormals;
-    TArray<FVector2D> EmptyUVs;
-    TArray<FColor> EmptyColors;
-    TArray<FProcMeshTangent> EmptyTangents;
+	// [修改] 使用缓存数组创建 Mesh Section
+	TArray<FVector> EmptyNormals;
+	TArray<FProcMeshTangent> EmptyTangents;
+	GridProcMesh->CreateMeshSection(0, CachedVertices, AllTriangles, EmptyNormals, CachedUVs, CachedColors, EmptyTangents, false);
 
-	GridProcMesh->CreateMeshSection(0, AllVertices, AllTriangles, EmptyNormals, AllUVs, EmptyColors, EmptyTangents, false);
+	// 重置检测队列指针
+	CurrentDetectionIndex = 0;
 }
 
 // =========================================================
