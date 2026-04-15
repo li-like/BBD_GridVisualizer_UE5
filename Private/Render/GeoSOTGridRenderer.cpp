@@ -1,5 +1,6 @@
 ﻿#include "Render/GeoSOTGridRenderer.h"
 #include "Core/GeoSOTMath.h"
+#include "Fission/GeoSOTRiskEnvironment.h"
 #include "Kismet/GameplayStatics.h"
 
 // =========================================================
@@ -50,6 +51,12 @@ void AGeoSOTGridRenderer::BeginPlay()
 {
     Super::BeginPlay();
     InitializeTextPool();
+	// 实例化并初始化风险环境
+	RiskEnv = NewObject<UGeoSOTRiskEnvironment>(this);
+	if (RiskEnv)
+	{
+		RiskEnv->InitializeMicroEnvironment(MinLat, MaxLat, MinLon, MaxLon);
+	}
 }
 
 bool AGeoSOTGridRenderer::ShouldTickIfViewportsOnly() const
@@ -68,7 +75,7 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
     // =========================================================
     // 1. 动态仿真：时间切片建筑物检测 (解决 Cesium 加载延迟问题)
     // =========================================================
-    if (GetWorld() && GridProcMesh)
+    if (GetWorld() && GridProcMesh && RiskEnv)
     {
         bool bNeedsMeshUpdate = false;
         double SpanMeters = UGeoSOTMath::GetGridSpanMeters(TargetLevel);
@@ -83,6 +90,7 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
 
         // 确定这一帧要检测的批次范围
         int32 EndIndex = FMath::Min(CurrentDetectionIndex + DetectionPerFrame, GridTextData.Num());
+    	float CurrentTime = GetWorld()->GetTimeSeconds();
 
         for (int32 i = CurrentDetectionIndex; i < EndIndex; ++i)
         {
@@ -110,24 +118,44 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
             FVector NorthDir = FVector::CrossProduct(UpDir, EastDir).GetSafeNormal();
             FQuat WorldQuat = FRotationMatrix::MakeFromXZ(EastDir, UpDir).ToQuat();
 
-            // c. 发射 OBB 探测
-            bool bHit = GetWorld()->OverlapAnyTestByChannel(WorldCenter, WorldQuat, DetectionChannel, OBBShape, QueryParams);
+        	// ---------------------------------------------------------
+        	// 步骤 1：获取物理硬约束 (建筑)
+        	// ---------------------------------------------------------
+        	bool bHit = GetWorld()->OverlapAnyTestByChannel(WorldCenter, WorldQuat, DetectionChannel, OBBShape, QueryParams);
+        	double Rho_Risk = bHit ? 1.0 : 0.0;
 
-            // d. 状态机流转与颜色修改
-            if (bHit != Grid.bIsObstacle)
-            {
-                Grid.bIsObstacle = bHit;
+        	// ---------------------------------------------------------
+        	// 步骤 2：获取环境软约束 (调用环境类)
+        	// ---------------------------------------------------------
+        	double W_Risk = RiskEnv->GetWeatherRisk(Grid.CenterLat, Grid.CenterLon, Grid.CenterAlt, CurrentTime);
+        	double Q_Risk = RiskEnv->GetCommunicationRisk(Grid.CenterLat, Grid.CenterLon, Grid.CenterAlt);
+
+        	// ---------------------------------------------------------
+        	// 步骤 3：异构融合打分 (执行论文公式)
+        	// ---------------------------------------------------------
+        	double Score = 1.0 - (Weight_Rho * Rho_Risk + Weight_Weather * W_Risk + Weight_Comm * Q_Risk);
+        	Score = FMath::Clamp(Score, 0.0, 1.0);
+            
+        	Grid.CurrentScore = Score; 
+
+        	// ---------------------------------------------------------
+        	// 步骤 4：阈值判断与颜色渲染更新
+        	// ---------------------------------------------------------
+        	bool bIsDanger = (Score < Threshold_Theta);
+
+        	if (bIsDanger != Grid.bIsObstacle)
+        	{
+        		Grid.bIsObstacle = bIsDanger;
                 
-                // 根据状态设置颜色：黄色为待裂变集合，绿色为安全
-            	FColor TargetColor = bHit ? FColor(255, 255, 0, 180) : FColor(0, 255, 0, 15);
+        		// 危险态(待裂变)为亮黄色高不透明度，安全态为绿色极度透明
+        		FColor TargetColor = bIsDanger ? FColor(255, 255, 0, 180) : FColor(0, 255, 0, 15);
 
-                // 更新该网格的 24 个顶点颜色
-                for (int v = 0; v < 24; ++v)
-                {
-                    CachedColors[Grid.VertexStartIndex + v] = TargetColor;
-                }
-                bNeedsMeshUpdate = true;
-            }
+        		for (int v = 0; v < 24; ++v)
+        		{
+        			CachedColors[Grid.VertexStartIndex + v] = TargetColor;
+        		}
+        		bNeedsMeshUpdate = true;
+        	}
         }
 
         // 推进队列指针，循环扫描
@@ -147,23 +175,31 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
         }
     }
 
+	// --- B. 文字 LOD 渲染 (解决原点漂移与视角跟随) ---
 	FVector ViewLocation;
 	bool bHasValidView = false;
 
-	// 判断是否在游戏运行中
 	if (GetWorld()->HasBegunPlay())
 	{
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
-		if (PlayerPawn)
+		// 【核心修复 1】：游戏运行状态下，获取真实的摄像机镜头位置，而不是角色的物理身体位置！
+		APlayerCameraManager* CameraManager = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+		if (CameraManager)
 		{
-			ViewLocation = PlayerPawn->GetActorLocation(); // 或者是 PlayerCameraManager 的位置
+			ViewLocation = CameraManager->GetCameraLocation(); 
 			bHasValidView = true;
 		}
 	}
-	else
+    
+	// 【核心修复 2】：黑魔法！如果在编辑器里(没点运行)，直接从渲染底层的上一帧抓取视口相机位置
+	if (!bHasValidView && GetWorld()->ViewLocationsRenderedLastFrame.Num() > 0)
 	{
-		// [核心修复] 如果在编辑器里没点运行，我们使用网格生成的锚点(Actor位置)作为 LOD 的中心
-		// 这样只要你把相机拉到网格附近，中心区域的文字就会强制显示出来预览
+		ViewLocation = GetWorld()->ViewLocationsRenderedLastFrame[0];
+		bHasValidView = true;
+	}
+
+	// 终极保底回退
+	if (!bHasValidView)
+	{
 		ViewLocation = GetActorLocation(); 
 		bHasValidView = true;
 	}
@@ -187,6 +223,13 @@ void AGeoSOTGridRenderer::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	// 确保在编辑器拖动或编译时，对象池和网格都是最新的
+	// 【新增】提前在编辑器构造阶段就实例化风险环境
+	if (!RiskEnv)
+	{
+		RiskEnv = NewObject<UGeoSOTRiskEnvironment>(this);
+	}
+	// 确保参数随时更新
+	RiskEnv->InitializeMicroEnvironment(MinLat, MaxLat, MinLon, MaxLon);
 	InitializeTextPool();
 	GenerateAndRenderGrids();
 }
@@ -420,12 +463,36 @@ void AGeoSOTGridRenderer::UpdateTextLOD(const FVector& PlayerLocation)
 
 			FVector DirToPlayer = PlayerLocation - TextWorldLoc;
 			if (DirToPlayer.IsNearlyZero()) DirToPlayer = FVector::UpVector;
+			FString FinalDisplayText = FString::Printf(TEXT("%s\nS: %.2f"), *TargetGrid->PrecomputedCodeStr, TargetGrid->CurrentScore);
           
 			// 直接拿预计算好的字符串，不用再每帧 Decode/Encode 了
-			TextComp->SetText(FText::FromString(TargetGrid->PrecomputedCodeStr));
+			TextComp->SetText(FText::FromString(FinalDisplayText));
 			TextComp->SetWorldLocation(TextWorldLoc);
-			TextComp->SetWorldRotation((-DirToPlayer).Rotation()); 
+			// =========================================================
+		  // 【核心修复】实现完美屏幕对齐 (Screen-Aligned Billboarding)
+		  // =========================================================
+		  APlayerCameraManager* CameraManager = UGameplayStatics::GetPlayerCameraManager(GetWorld(), 0);
+		  if (CameraManager)
+		  {
+			 // 1. 直接获取摄像机当前的世界旋转姿态
+			 FRotator CameraRotation = CameraManager->GetCameraRotation();
+			 
+			 // 2. 修正 UTextRenderComponent 的翻转问题。
+			 // 因为 TextRender 默认正面朝向 -X，我们需要将 Yaw 轴旋转 180 度，
+			 // 这样文字的局部 -X 轴就会完美对齐摄像机的 X 轴 (即摄像机视线)。
+			 FRotator BillboardRot = CameraRotation;
+			 BillboardRot.Yaw += 180.f; // 加上 180 度偏航修正
+			 
+			 // 3. 还可以修正文字倾斜问题 (可选)：
+			 // 如果你发现摄像机倾斜时文字也跟着倾斜，可以把 Roll 轴锁死为 0
+			 // BillboardRot.Roll = 0.f; 
+
+			 // 4. 将修正后的旋转应用到文字组件上
+			 TextComp->SetWorldRotation(BillboardRot);
+		  }
+		  // =========================================================
 			TextComp->SetWorldSize(TextWorldSize); 
+			TextComp->SetTextRenderColor(TargetGrid->bIsObstacle ? FColor::Yellow : FColor::Green);
 			TextComp->SetVisibility(true);
 		}
 		else
@@ -433,4 +500,6 @@ void AGeoSOTGridRenderer::UpdateTextLOD(const FVector& PlayerLocation)
 			TextComp->SetVisibility(false);
 		}
 	}
+	
+	
 }
