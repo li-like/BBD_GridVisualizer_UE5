@@ -2,6 +2,7 @@
 #include "Core/GeoSOTMath.h"
 #include "Fission/GeoSOTRiskEnvironment.h" 
 #include "Kismet/GameplayStatics.h"
+#include "CesiumGeoreference.h" // 确保这行存在
 #include "Engine/World.h"
 
 // --- 纯整数转换辅助函数 (用于计算画框的边界) ---
@@ -51,6 +52,9 @@ void AGeoSOTGridRenderer::OnConstruction(const FTransform& Transform)
 
     if (!RiskEnv) RiskEnv = NewObject<UGeoSOTRiskEnvironment>(this);
     if (!DataManager) DataManager = NewObject<UGeoSOTDataManager>(this);
+    
+    DataManager->bEnableAdaptiveFission = this->bEnableAdaptiveFission;
+    DataManager->MaxFissionLevel = this->MaxFissionLevel;
 
     if (GetWorld() && CesiumGeoreference)
     {
@@ -90,14 +94,23 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
 
     // 2. 触发大脑的心跳，刷新环境风险 (风和通信)
     DataManager->RollingDynamicScan(GetWorld()->GetTimeSeconds());
+    
 
-    // 3. 索要数据：给我半径 800m 内，所有已经算好的网格！
+    if (!bIsAnchorInitialized || FVector::DistSquaredXY(CameraPos, LastQueryAnchor) > (AnchorUpdateThreshold * AnchorUpdateThreshold))
+    {
+        // 更新锚点
+        LastQueryAnchor = CameraPos;
+        bIsAnchorInitialized = true;
+    }
+
+    // 3. 索要数据：【注意】这里用的是 LastQueryAnchor（静止的锚点），而不是乱动的 CameraPos！
     TArray<FGridNodeData> ActiveNodes;
-    DataManager->GetReadyNodesInRadius(CameraPos, SensingRadius, ActiveNodes);
+    DataManager->GetReadyNodesInRadius(LastQueryAnchor, SensingRadius, ActiveNodes);
 
     if (ActiveNodes.Num() == 0) return;
 
     // 4. 智能渲染判断：
+    // 因为锚点在 500 米内是静止的，所以 ActiveNodes.Num() 绝对不会变，不会触发清空重建！
     if (ActiveNodes.Num() != LastRenderedNodeCount)
     {
         RebuildMeshGeometry(ActiveNodes);
@@ -105,7 +118,8 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
     }
     else
     {
-        // 只有在节点数量完全一致（仅仅是天气分数变化或相机移动）时，才安全地刷新颜色
+        // 5. 颜色更新：【注意】这里传的依然是真实的 CameraPos！
+        // 这样即使几何体没更新，脚下的绿色安全区依然会平滑跟随你的真实视角。
         UpdateMeshColors(ActiveNodes, CameraPos);
     }
 
@@ -118,28 +132,36 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
 // =========================================================
 void AGeoSOTGridRenderer::RebuildMeshGeometry(const TArray<FGridNodeData>& ActiveNodes)
 {
-    // GridProcMesh->ClearAllMeshSections();
     CachedVertices.Empty(ActiveNodes.Num() * 8);
     CachedTriangles.Empty(ActiveNodes.Num() * 36);
     CachedUVs.Empty(ActiveNodes.Num() * 24);
     CachedColors.Empty(ActiveNodes.Num() * 24);
 
-    double SpanMeters = UGeoSOTMath::GetGridSpanMeters(TargetLevel);
     int32 VertexIndexOffset = 0;
 
     for (const FGridNodeData& Node : ActiveNodes)
     {
-        // 根据中心的纯数据，反向推导画框的物理边界
-        uint32 LatIdx = AngleToGridIndex(Node.CenterLat, TargetLevel);
-        uint32 LonIdx = AngleToGridIndex(Node.CenterLon, TargetLevel);
+        // =========================================================
+        // 【核心修复】：必须使用网格自身的基因 (Node.Level)！
+        // =========================================================
+        int32 CurrentNodeLevel = Node.Level; 
+        
+        // 动态获取当前网格的真实大小 (L20=61m, L21=30m, L22=15m...)
+        double SpanMeters = UGeoSOTMath::GetGridSpanMeters(CurrentNodeLevel);
 
-        double MinLatDeg = GridIndexToBoundaryAngle(LatIdx, TargetLevel);
-        double MaxLatDeg = GridIndexToBoundaryAngle(LatIdx + 1, TargetLevel);
-        double MinLonDeg = GridIndexToBoundaryAngle(LonIdx, TargetLevel);
-        double MaxLonDeg = GridIndexToBoundaryAngle(LonIdx + 1, TargetLevel);
+        // 使用当前网格的真实 Level 反向推导物理边界
+        uint32 LatIdx = AngleToGridIndex(Node.CenterLat, CurrentNodeLevel);
+        uint32 LonIdx = AngleToGridIndex(Node.CenterLon, CurrentNodeLevel);
+
+        double MinLatDeg = GridIndexToBoundaryAngle(LatIdx, CurrentNodeLevel);
+        double MaxLatDeg = GridIndexToBoundaryAngle(LatIdx + 1, CurrentNodeLevel);
+        double MinLonDeg = GridIndexToBoundaryAngle(LonIdx, CurrentNodeLevel);
+        double MaxLonDeg = GridIndexToBoundaryAngle(LonIdx + 1, CurrentNodeLevel);
+        
         double MinAltVal = Node.CenterAlt - (SpanMeters * 0.5);
         double MaxAltVal = Node.CenterAlt + (SpanMeters * 0.5);
 
+        // --- 下面的代码保持完全不变 ---
         FVector3d LLH[8] = {
             FVector3d(MinLonDeg, MinLatDeg, MinAltVal), FVector3d(MaxLonDeg, MinLatDeg, MinAltVal), 
             FVector3d(MinLonDeg, MaxLatDeg, MinAltVal), FVector3d(MaxLonDeg, MaxLatDeg, MinAltVal), 
@@ -154,8 +176,6 @@ void AGeoSOTGridRenderer::RebuildMeshGeometry(const TArray<FGridNodeData>& Activ
         }
 
         int32 FaceIdx[6][4] = { {0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 4, 5}, {2, 3, 6, 7}, {0, 2, 4, 6}, {1, 3, 5, 7} };
-
-        // 默认透明色，稍后由 UpdateMeshColors 填充
         FColor DefColor = FColor(0, 0, 0, 0);
 
         for (int face = 0; face < 6; ++face) {
@@ -182,7 +202,6 @@ void AGeoSOTGridRenderer::UpdateMeshColors(const TArray<FGridNodeData>& ActiveNo
     bool bNeedsUpdate = false;
     double SafeRadiusSq = SafeVisibleRadius * SafeVisibleRadius;
 
-    // 因为重建和更新的顺序完全一致，我们可以直接通过索引 i * 24 来定位顶点颜色
     for (int32 i = 0; i < ActiveNodes.Num(); ++i)
     {
         const FGridNodeData& Node = ActiveNodes[i];
@@ -190,17 +209,31 @@ void AGeoSOTGridRenderer::UpdateMeshColors(const TArray<FGridNodeData>& ActiveNo
         FVector3d World3D = CesiumGeoreference->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(Node.CenterLon, Node.CenterLat, Node.CenterAlt));
         double DistSq = FVector::DistSquaredXY((FVector)World3D, CameraPos);
 
-        // 读大脑的分数判断危险
-        bool bIsDanger = (Node.Score < DataManager->Threshold_Theta);
         FColor TargetColor;
 
-        // 双层视窗逻辑
-        if (DistSq > SafeRadiusSq) {
-            TargetColor = bIsDanger ? FColor(255, 255, 0, 180) : FColor(0, 0, 0, 0); 
-        } else {
-            TargetColor = bIsDanger ? FColor(255, 255, 0, 180) : FColor(0, 255, 0, 15);
+        // 1. 双层视窗逻辑：超出安全范围的网格，直接二元隐身
+        if (DistSq > SafeRadiusSq) 
+        {
+            TargetColor = FColor(0, 0, 0, 0); 
+        } 
+        else 
+        {
+
+            if (Node.bIsObstacle) 
+            {
+                // 危险网格/禁飞区：醒目的红色，且几乎不透明 (Alpha = 230)
+                TargetColor = FColor(255, 0, 0, 230);
+            } 
+            else 
+            {
+                // 安全网格，按照层级加深绿色实体感
+                uint8 Alpha = 15 + (Node.Level - 20) * 45; 
+                Alpha = FMath::Min((uint8)150, Alpha); // 防止超出最大透明度
+                TargetColor = FColor(0, 255, 0, Alpha);
+            }
         }
 
+        // 3. 颜色覆写
         int32 ColorStartIdx = i * 24;
         if (CachedColors[ColorStartIdx] != TargetColor)
         {

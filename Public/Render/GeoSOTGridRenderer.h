@@ -1,25 +1,113 @@
-﻿// Copyright 2020-2021 CesiumGS, Inc. and Contributors
-
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ProceduralMeshComponent.h"
+#include "Components/TextRenderComponent.h"
+#include "Core/GeoSOTDataManager.h"
 #include "GeoSOTGridRenderer.generated.h"
+
+// 前置声明
+class ACesiumGeoreference;
+class UGeoSOTRiskEnvironment;
+class UGeoSOTDataManager;
 
 UCLASS()
 class GEOSOTSYSTEM_API AGeoSOTGridRenderer : public AActor
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
 
 public:
-	// Sets default values for this actor's properties
-	AGeoSOTGridRenderer();
+    AGeoSOTGridRenderer();
 
 protected:
-	// Called when the game starts or when spawned
-	virtual void BeginPlay() override;
+    virtual void BeginPlay() override;
+    virtual void Tick(float DeltaTime) override;
+    virtual void OnConstruction(const FTransform& Transform) override;
+    virtual bool ShouldTickIfViewportsOnly() const override;
 
 public:
-	// Called every frame
-	virtual void Tick(float DeltaTime) override;
+    // --- 核心配置 ---
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Reference")
+    ACesiumGeoreference* CesiumGeoreference;
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Settings")
+    int32 TargetLevel = 20;
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Settings")
+    bool bEnableAdaptiveFission = true;
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Settings")
+    int32 MaxFissionLevel = 23;
+
+    // --- 边界设置 ---
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MinLat;
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MaxLat;
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MinLon;
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MaxLon;
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MinAlt = 0.0;
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Bounds")
+    double MaxAlt = 500.0;
+
+    // --- 渲染控制 ---
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Render")
+    double SensingRadius = 2000.0;      // 索要数据的半径
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Render")
+    double SafeVisibleRadius = 800.0;   // 颜色渲染可见的半径
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Render")
+    float AnchorUpdateThreshold = 500.0; // 锚点更新阈值
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Text")
+    float TextWorldSize = 50.0;
+
+    UPROPERTY(EditAnywhere, Category = "GeoSOT|Text")
+    int32 MaxTextPoolSize = 100;
+
+private:
+    /** 重新构建几何体网格 */
+    void RebuildMeshGeometry(const TArray<FGridNodeData>& ActiveNodes);
+
+    /** 刷新网格颜色（每帧） */
+    void UpdateMeshColors(const TArray<FGridNodeData>& ActiveNodes, const FVector& CameraPos);
+
+    /** 初始化文字组件池 */
+    void InitializeTextPool();
+
+    /** 刷新文字 LOD */
+    void UpdateTextLOD(const TArray<FGridNodeData>& ActiveNodes, const FVector& CameraPos);
+
+    /** 获取当前活动相机位置 */
+    bool GetCurrentCameraLocation(FVector& OutLocation) const;
+
+private:
+    UPROPERTY(VisibleAnywhere)
+    UProceduralMeshComponent* GridProcMesh;
+
+
+    UPROPERTY()
+    UGeoSOTDataManager* DataManager;
+
+    UPROPERTY()
+    UGeoSOTRiskEnvironment* RiskEnv;
+
+    // --- 渲染缓存数据 ---
+    TArray<FVector> CachedVertices;
+    TArray<int32> CachedTriangles;
+    TArray<FVector2D> CachedUVs;
+    TArray<FColor> CachedColors;
+
+    UPROPERTY()
+    TArray<UTextRenderComponent*> TextPool;
+
+    FVector LastQueryAnchor = FVector::ZeroVector;
+    bool bIsAnchorInitialized = false;
+    bool bIsPoolInitialized = false;
+    int32 LastRenderedNodeCount = -1;
 };
