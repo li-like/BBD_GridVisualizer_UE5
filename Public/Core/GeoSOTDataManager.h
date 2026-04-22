@@ -81,7 +81,7 @@ struct FGridChunk
     bool bIsTopologyFinalized = false; // 拓扑是否锁死
 
     UPROPERTY()
-    int32 ScanCount = 0;
+    float LastPhysicsScanTime = -999.0f;
 };
 
 UCLASS(BlueprintType)

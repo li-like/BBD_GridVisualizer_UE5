@@ -124,7 +124,7 @@ void AGeoSOTGridRenderer::Tick(float DeltaTime)
     }
 
     // 5. 更新文字
-    UpdateTextLOD(ActiveNodes, CameraPos);
+    // UpdateTextLOD(ActiveNodes, CameraPos);
 }
 
 // =========================================================
@@ -211,24 +211,24 @@ void AGeoSOTGridRenderer::UpdateMeshColors(const TArray<FGridNodeData>& ActiveNo
 
         FColor TargetColor;
 
-        // 1. 双层视窗逻辑：超出安全范围的网格，直接二元隐身
-        if (DistSq > SafeRadiusSq) 
+        // 【修改后逻辑】：危险网格享有最高视觉优先级！
+        if (Node.bIsObstacle) 
         {
-            TargetColor = FColor(0, 0, 0, 0); 
+            // 只要是障碍物，在 SensingRadius (ActiveNodes包含的范围) 内一律显示红色
+            TargetColor = FColor(255, 0, 0, 230);
         } 
         else 
         {
-
-            if (Node.bIsObstacle) 
+            // 安全网格，执行双层视窗逻辑
+            if (DistSq > SafeRadiusSq) 
             {
-                // 危险网格/禁飞区：醒目的红色，且几乎不透明 (Alpha = 230)
-                TargetColor = FColor(255, 0, 0, 230);
+                TargetColor = FColor(0, 0, 0, 0); // 超出安全视窗，隐身
             } 
             else 
             {
-                // 安全网格，按照层级加深绿色实体感
+                // 安全视窗内，按照层级加深绿色实体感
                 uint8 Alpha = 15 + (Node.Level - 20) * 45; 
-                Alpha = FMath::Min((uint8)150, Alpha); // 防止超出最大透明度
+                Alpha = FMath::Min((uint8)150, Alpha); 
                 TargetColor = FColor(0, 255, 0, Alpha);
             }
         }

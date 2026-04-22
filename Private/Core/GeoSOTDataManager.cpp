@@ -253,16 +253,21 @@ void UGeoSOTDataManager::RollingDynamicScan(float CurrentTimeSeconds)
 {
     if (ReadyChunkKeys.Num() == 0 || !WorldPtr || !GeoRefPtr) return;
 
+    // 轮询：每帧只拿出一个 Chunk 来处理，分摊性能压力
     CurrentScanChunkIndex = (CurrentScanChunkIndex + 1) % ReadyChunkKeys.Num();
     FString KeyToScan = ReadyChunkKeys[CurrentScanChunkIndex];
 
     if (FGridChunk* ChunkPtr = GlobalChunkMap.Find(KeyToScan))
     {
         // =========================================================
-        // 分支 A：物理拓扑未锁死，执行昂贵的重建与扫掠
+        // 分支 A：重量级物理扫描 (带有 2.0 秒的冷却时间)
         // =========================================================
-        if (!ChunkPtr->bIsTopologyFinalized)
+        // 只有当当前时间距离上次扫描超过 2 秒时，才执行昂贵的物理扫掠
+        if (CurrentTimeSeconds - ChunkPtr->LastPhysicsScanTime > 2.0f)
         {
+            // 重置秒表
+            ChunkPtr->LastPhysicsScanTime = CurrentTimeSeconds;
+            
             ChunkPtr->Nodes.Empty(); 
 
             double BaseSpanMeters = UGeoSOTMath::GetGridSpanMeters(TargetLevel);
@@ -284,32 +289,23 @@ void UGeoSOTDataManager::RollingDynamicScan(float CurrentTimeSeconds)
                     }
                 }
             }
-
-            // 增加扫描次数。如果一个区块被反复扫了 10 次（说明地形早就加载透了），将其永久锁死！
-            ChunkPtr->ScanCount++;
-            if (ChunkPtr->ScanCount > 10) 
-            {
-                ChunkPtr->bIsTopologyFinalized = true;
-            }
         }
         // =========================================================
-        // 分支 B：物理拓扑已锁死，只执行极速的动态气象/通信刷新
+        // 分支 B：轻量级动态风险刷新 (无冷却，极速运算)
         // =========================================================
         else 
         {
+            // 在物理冷却的间隙，我们只做简单的数学算分，这几乎不消耗性能
             if (RiskEnvPtr) 
             {
                 for (FGridNodeData& Node : ChunkPtr->Nodes) 
                 {
-                    // 仅更新动态权重
                     Node.W_Risk = RiskEnvPtr->GetWeatherRisk(Node.CenterLat, Node.CenterLon, Node.CenterAlt, CurrentTimeSeconds);
                     Node.Q_Risk = RiskEnvPtr->GetCommunicationRisk(Node.CenterLat, Node.CenterLon, Node.CenterAlt);
                     
-                    // 重新算分
                     Node.Score = 1.0 - (Weight_Rho * Node.Rho_Risk + Weight_Weather * Node.W_Risk + Weight_Comm * Node.Q_Risk);
                     Node.Score = FMath::Clamp(Node.Score, 0.0, 1.0);
                     
-                    // 动态风险可能会导致原本安全的网格分数不及格，但此时不再引发结构改变，仅作颜色警告
                     Node.bIsObstacle = (Node.Score < Threshold_Theta);
                 }
             }
