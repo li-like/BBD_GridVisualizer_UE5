@@ -56,6 +56,13 @@ struct FGridNodeData
     bool bIsObstacle;
 };
 
+UENUM(BlueprintType)
+enum class EGridDivisionMode : uint8
+{
+    Adaptive    UMETA(DisplayName = "自适应八叉树 (Adaptive)"),
+    FullUniform UMETA(DisplayName = "完全均匀划分 (Full Uniform)")
+};
+
 /** 区块数据结构 */
 USTRUCT(BlueprintType)
 struct FGridChunk
@@ -108,6 +115,14 @@ public:
 
     /** 获取半径内的就绪节点 */
     void GetReadyNodesInRadius(const FVector& CameraPos, double Radius, TArray<FGridNodeData>& OutNodes) const;
+    
+    /** 导出当前的全局网格地图数据到 CSV */
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Export")
+    void ExportMapSnapshotToCSV(FString AreaName);
+
+    /** 清空大脑的记忆 (方便你飞到下一个实验区域时重新开始记录) */
+    UFUNCTION(BlueprintCallable, Category = "GeoSOT|Export")
+    void ClearMapMemory();
 
 public:
     // --- 算法参数 ---
@@ -128,10 +143,17 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "GeoSOT|Settings")
     double Threshold_Theta = 0.6; // 安全阈值
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Settings")
+    EGridDivisionMode DivisionMode = EGridDivisionMode::Adaptive;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GeoSOT|Settings")
+    int32 TargetUniformLevel = 23; // 完全划分的目标层级
 
 private:
     /** 构建区块内的节点（初始 L20） */
     void BuildChunkNodes(FGridChunk& OutChunk);
+    
 
     /** 递归评估并裂变 */
     void EvaluateAndFission(FGridChunk& OutChunk, uint32 LatIdx, uint32 LonIdx, int32 AltIdx, int32 CurrentLevel);

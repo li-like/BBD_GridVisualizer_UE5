@@ -134,48 +134,73 @@ void UGeoSOTDataManager::EvaluateAndFission(FGridChunk& OutChunk, uint32 LatIdx,
     double CenterLon = GridIndexToCenterAngle(LonIdx, CurrentLevel);
     double CenterAlt = (AltIdx * SpanMeters) + (SpanMeters * 0.5);
 
-    // 1. 执行物理环境扫掠探测
-    FVector3d Center3D = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat, CenterAlt));
-    FVector WorldCenter = (FVector)Center3D;
-    FVector3d UpLLH = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat, CenterAlt + 100.0));
-    FVector UpDir = (FVector)(UpLLH - Center3D).GetSafeNormal();
-    FVector3d NorthLLH = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat + 0.01, CenterAlt));
-    FVector TempNorthDir = (FVector)(NorthLLH - Center3D).GetSafeNormal();
-    FQuat WorldQuat = FRotationMatrix::MakeFromXZ(FVector::CrossProduct(TempNorthDir, UpDir).GetSafeNormal(), UpDir).ToQuat();
-
-    FVector BoxHalfExtent(SpanMeters * 48.0, SpanMeters * 48.0, 1.0);
-    FCollisionShape SweepShape = FCollisionShape::MakeBox(BoxHalfExtent);
-    FVector TopPos = WorldCenter + UpDir * (SpanMeters * 50.0);
-    FVector BottomPos = WorldCenter - UpDir * (SpanMeters * 50.0);
-    
-    FHitResult HitResult;
-    FCollisionQueryParams QueryParams;
-    QueryParams.bTraceComplex = true;
-    bool bHit = WorldPtr->SweepSingleByChannel(HitResult, TopPos, BottomPos, WorldQuat, ECC_Visibility, SweepShape, QueryParams);
-
     // ==========================================================
-    // 【核心修正 1】：在裂变时，引入气象和通信风险，计算真·综合得分！
+    // 【核心策略分流与性能优化】
     // ==========================================================
-    double Rho_Risk = bHit ? 1.0 : 0.0;
-    
-    // 如果存在动态环境指针，则获取实时气象和通信风险
-    double W_Risk = 0.0;
-    double Q_Risk = 0.0;
-    if (RiskEnvPtr) 
+    // 判断当前节点是否属于“强制向下裂变”的中间节点
+    bool bIsIntermediateUniformNode = (DivisionMode == EGridDivisionMode::FullUniform) && (CurrentLevel < TargetUniformLevel);
+
+    double Rho_Risk = 0.0;
+    double Score = 1.0;
+    bool bIsDangerous = false;
+
+    // 优化引爆点：如果是完全划分的中间节点，直接跳过昂贵的 UE 物理扫掠和风险计算！
+    if (!bIsIntermediateUniformNode)
     {
-        float CurrentTime = WorldPtr->GetTimeSeconds();
-        W_Risk = RiskEnvPtr->GetWeatherRisk(CenterLat, CenterLon, CenterAlt, CurrentTime);
-        Q_Risk = RiskEnvPtr->GetCommunicationRisk(CenterLat, CenterLon, CenterAlt);
+        // --- 1. 执行物理环境扫掠探测 (保持你原有的逻辑) ---
+        FVector3d Center3D = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat, CenterAlt));
+        FVector WorldCenter = (FVector)Center3D;
+        FVector3d UpLLH = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat, CenterAlt + 100.0));
+        FVector UpDir = (FVector)(UpLLH - Center3D).GetSafeNormal();
+        FVector3d NorthLLH = GeoRefPtr->TransformLongitudeLatitudeHeightPositionToUnreal(FVector3d(CenterLon, CenterLat + 0.01, CenterAlt));
+        FVector TempNorthDir = (FVector)(NorthLLH - Center3D).GetSafeNormal();
+        FQuat WorldQuat = FRotationMatrix::MakeFromXZ(FVector::CrossProduct(TempNorthDir, UpDir).GetSafeNormal(), UpDir).ToQuat();
+
+        FVector BoxHalfExtent(SpanMeters * 48.0, SpanMeters * 48.0, 1.0);
+        FCollisionShape SweepShape = FCollisionShape::MakeBox(BoxHalfExtent);
+        FVector TopPos = WorldCenter + UpDir * (SpanMeters * 50.0);
+        FVector BottomPos = WorldCenter - UpDir * (SpanMeters * 50.0);
+        
+        FHitResult HitResult;
+        FCollisionQueryParams QueryParams;
+        QueryParams.bTraceComplex = true;
+        bool bHit = WorldPtr->SweepSingleByChannel(HitResult, TopPos, BottomPos, WorldQuat, ECC_Visibility, SweepShape, QueryParams);
+
+        // --- 2. 气象和通信风险计算 ---
+        Rho_Risk = bHit ? 1.0 : 0.0;
+        double W_Risk = 0.0;
+        double Q_Risk = 0.0;
+        if (RiskEnvPtr) 
+        {
+            float CurrentTime = WorldPtr->GetTimeSeconds();
+            W_Risk = RiskEnvPtr->GetWeatherRisk(CenterLat, CenterLon, CenterAlt, CurrentTime);
+            Q_Risk = RiskEnvPtr->GetCommunicationRisk(CenterLat, CenterLon, CenterAlt);
+        }
+
+        Score = 1.0 - (Weight_Rho * Rho_Risk + Weight_Weather * W_Risk + Weight_Comm * Q_Risk); 
+        Score = FMath::Clamp(Score, 0.0, 1.0);
+        bIsDangerous = (Score < Threshold_Theta);
     }
 
-    double Score = 1.0 - (Weight_Rho * Rho_Risk + Weight_Weather * W_Risk + Weight_Comm * Q_Risk); 
-    Score = FMath::Clamp(Score, 0.0, 1.0);
-    bool bIsDangerous = (Score < Threshold_Theta);
+    // ==========================================================
+    // 命运分流判定：到底存为网格，还是继续裂变？
+    // ==========================================================
+    bool bShouldFission = false;
 
-    // 2. 裂变命运分流判定
-    // 如果安全，或者开关关闭，或者已经切到了设定的极限层级 -> 终止裂变
-    if (!bIsDangerous || !bEnableAdaptiveFission || CurrentLevel >= MaxFissionLevel)
+    if (DivisionMode == EGridDivisionMode::FullUniform)
     {
+        // 完全划分模式：只要没到目标层级，无条件裂变
+        bShouldFission = (CurrentLevel < TargetUniformLevel);
+    }
+    else
+    {
+        // 自适应模式：危险 + 开关开启 + 没到底限层级
+        bShouldFission = (bIsDangerous && bEnableAdaptiveFission && CurrentLevel < MaxFissionLevel);
+    }
+
+    if (!bShouldFission)
+    {
+        // 终止裂变，记录当前节点
         FGridNodeData NewNode;
         NewNode.Level = CurrentLevel;
         NewNode.CenterLat = CenterLat;
@@ -185,20 +210,18 @@ void UGeoSOTDataManager::EvaluateAndFission(FGridChunk& OutChunk, uint32 LatIdx,
         NewNode.Rho_Risk = Rho_Risk;
         NewNode.Score = Score;
         
-        // 【最终生死判决】：只有它危险，并且由于条件限制(到达底层或关了开关)无法再裂变逃生时，它才被判为绝对障碍物！
+        // 危险判定：只有在非中间节点计算过得分后，且得分低于阈值才为危险
         NewNode.bIsObstacle = bIsDangerous; 
         
         OutChunk.Nodes.Add(NewNode);
     }
     else
     {
-        // 3. 触发八叉树裂变：当前节点不存入数组，直接炸成 8 个子节点！
-        // 核心数学：子节点的起点索引，等于父节点索引左移一位 (乘以2)
+        // 触发八叉树裂变：炸成 8 个子节点
         uint32 ChildLatStart = LatIdx << 1;
         uint32 ChildLonStart = LonIdx << 1;
         int32 ChildAltStart = AltIdx << 1; 
 
-        // 生成 8 个子节点并递归探测
         for (int32 h = 0; h < 2; ++h) {
             for (int32 i = 0; i < 2; ++i) {
                 for (int32 j = 0; j < 2; ++j) {
@@ -263,7 +286,7 @@ void UGeoSOTDataManager::RollingDynamicScan(float CurrentTimeSeconds)
         // 分支 A：重量级物理扫描 (带有 2.0 秒的冷却时间)
         // =========================================================
         // 只有当当前时间距离上次扫描超过 2 秒时，才执行昂贵的物理扫掠
-        if (CurrentTimeSeconds - ChunkPtr->LastPhysicsScanTime > 2.0f)
+        if (CurrentTimeSeconds - ChunkPtr->LastPhysicsScanTime > 5.0f)
         {
             // 重置秒表
             ChunkPtr->LastPhysicsScanTime = CurrentTimeSeconds;
@@ -328,3 +351,73 @@ void UGeoSOTDataManager::GetReadyNodesInRadius(const FVector& CameraPos, double 
         }
     }
 }
+
+// =========================================================
+// 论文数据导出：CSV 写入逻辑
+// =========================================================
+void UGeoSOTDataManager::ExportMapSnapshotToCSV(FString AreaName)
+{
+    // 定义文件保存路径 
+    FString DirectoryPath = FPaths::ProjectSavedDir() + TEXT("SimulationData/");
+    // 文件名会自动带上区域名和当前系统时间，防止覆盖
+    FString FileName = FString::Printf(TEXT("%s_GeoSOT_%s.csv"), *AreaName, *FDateTime::Now().ToString(TEXT("%H%M%S")));
+    FString FilePath = DirectoryPath + FileName;
+
+    // 确保文件夹存在
+    IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+    if (!PlatformFile.DirectoryExists(*DirectoryPath)) {
+        PlatformFile.CreateDirectory(*DirectoryPath);
+    }
+
+    // 写入 CSV 的表头 (严格对应论文的数据维度)
+    FString CSVContent = TEXT("Level,CenterLat,CenterLon,CenterAlt,GeoSOTCode,Rho_Risk,W_Risk,Q_Risk,TotalScore,IsObstacle\n");
+
+    int32 ExportedNodeCount = 0;
+
+    // 遍历大脑里所有的区块和网格
+    for (const auto& Pair : GlobalChunkMap) 
+    {
+        // 只有彻底就绪的网格才会被记录
+        if (Pair.Value.State == EChunkState::Ready) 
+        {
+            for (const FGridNodeData& Node : Pair.Value.Nodes) 
+            {
+                // 将数据格式化为逗号分隔的字符串
+                FString Line = FString::Printf(TEXT("%d,%.7f,%.7f,%.2f,%s,%.2f,%.2f,%.2f,%.4f,%d\n"),
+                    Node.Level, 
+                    Node.CenterLat, 
+                    Node.CenterLon, 
+                    Node.CenterAlt, 
+                    *Node.GeoSOTCode,
+                    Node.Rho_Risk, 
+                    Node.W_Risk, 
+                    Node.Q_Risk, 
+                    Node.Score, 
+                    Node.bIsObstacle ? 1 : 0);
+                
+                CSVContent += Line;
+                ExportedNodeCount++;
+            }
+        }
+    }
+
+    // 写入本地硬盘
+    if (FFileHelper::SaveStringToFile(CSVContent, *FilePath))
+    {
+        // 屏幕打印绿字，提示成功！
+        if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, FString::Printf(TEXT("成功导出 %d 个网格数据！"), ExportedNodeCount));
+        UE_LOG(LogTemp, Warning, TEXT("导出路径: %s"), *FilePath);
+    }
+    else
+    {
+        if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("导出失败！请检查文件夹权限。"));
+    }
+}
+
+void UGeoSOTDataManager::ClearMapMemory()
+{
+    GlobalChunkMap.Empty();
+    ReadyChunkKeys.Empty();
+    if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("地图记忆已清空，可开始新的区域采集。"));
+}
+

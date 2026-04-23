@@ -33,12 +33,15 @@ void AGeoSOTGridRenderer::BeginPlay()
     InitializeTextPool();
 
     // 【核心修复】：解决运行游戏后不更新的 Bug！必须给大脑喂一次全新的游戏世界(PIE)指针。
+    //初始化环境变量指针和数据管理指针
     if (!RiskEnv) RiskEnv = NewObject<UGeoSOTRiskEnvironment>(this);
     if (!DataManager) DataManager = NewObject<UGeoSOTDataManager>(this);
 
     if (GetWorld() && CesiumGeoreference)
     {
         RiskEnv->InitializeMicroEnvironment(MinLat, MaxLat, MinLon, MaxLon); 
+        
+        //调用 DataManager::InitializeManager，确立整个空域的经纬度和高度边界，并转换为基础的整数索引（防止浮点数精度丢失）
         DataManager->InitializeManager(GetWorld(), CesiumGeoreference, RiskEnv, MinLat, MaxLat, MinLon, MaxLon, MinAlt, MaxAlt, TargetLevel);
     }
 }
@@ -302,4 +305,62 @@ void AGeoSOTGridRenderer::UpdateTextLOD(const TArray<FGridNodeData>& ActiveNodes
           TextComp->SetVisibility(true);
        } else { TextComp->SetVisibility(false); }
     }
+}
+
+
+void AGeoSOTGridRenderer::TriggerDataExport()
+{
+    if (DataManager)
+    {
+        // 调用我们之前在 DataManager 里写好的导出函数
+        DataManager->ExportMapSnapshotToCSV(ExportAreaName);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("导出失败：DataManager 尚未初始化！"));
+    }
+}
+
+void AGeoSOTGridRenderer::TriggerClearMemory()
+{
+    if (DataManager)
+    {
+        DataManager->ClearMapMemory();
+        
+        // 清空后，顺便把渲染器的显示也刷新一下
+        LastRenderedNodeCount = -1;
+        // 如果是 HISM，记得清空实例
+        // HISMComp->ClearInstances(); 
+    }
+}
+
+void AGeoSOTGridRenderer::ApplyDivisionMode()
+{
+    if (!DataManager)
+    {
+        UE_LOG(LogTemp, Error, TEXT("大脑未初始化，无法切换模式！"));
+        return;
+    }
+
+    // 1. 把面板上选好的参数，喂给大脑
+    DataManager->DivisionMode = this->DivisionMode;
+    if (this->DivisionMode == EGridDivisionMode::FullUniform)
+    {
+        DataManager->TargetUniformLevel = this->TargetUniformLevel;
+    }
+
+    // 2. 抹除当前所有的网格记忆与缓存
+    DataManager->ClearMapMemory();
+    
+    // 3. 重置渲染器的判断条件，强制下一帧重新请求数据并重建模型
+    bIsAnchorInitialized = false; 
+    LastRenderedNodeCount = -1;
+    
+    // 屏幕和日志双重提示
+    FString ModeStr = (this->DivisionMode == EGridDivisionMode::Adaptive) ? TEXT("自适应八叉树") : TEXT("完全划分");
+    if (GEngine) 
+    {
+        GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan, FString::Printf(TEXT("网格已刷新！当前模式: %s"), *ModeStr));
+    }
+    UE_LOG(LogTemp, Warning, TEXT("面板触发重构：当前模式为 %s"), *ModeStr);
 }
